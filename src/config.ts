@@ -79,7 +79,7 @@ export const DEFAULT_POLICY: Policy = {
 			"**/migrations/**",
 			"**/Dockerfile",
 			"**/*.tf",
-			"**/package.json",
+			// package.json is checked by key instead: scripts-only changes are reviewed; anything else needs a human.
 			"package-lock.json",
 			"**/Makefile",
 			"**/.husky/**",

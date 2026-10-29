@@ -161,7 +161,7 @@ describe("riskFloor", () => {
 		assert.equal(renamed.tier, "high");
 		assert.match(renamed.reasons.join(" "), /Dockerfile/);
 		assert.equal(floor([".github/workflows/ci.yml"]).tier, "high");
-		assert.equal(floor(["packages/worker/package.json"]).tier, "high");
+		assert.equal(floor(["packages/worker/Cargo.toml"]).tier, "high");
 	});
 
 	it("is high for new dependencies", () => {

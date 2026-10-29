@@ -30,7 +30,7 @@ import { dailyBudget, nextRoomAt, recordSpend } from "./spend.ts";
 import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, type FrictionInput, frictionFromAudit } from "./friction.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
 import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
-import { effectiveRisk, type ParsedPr, parsePrBody, PR_TEMPLATE, type RiskFile, riskFloor, type Tier } from "./prtemplate.ts";
+import { effectiveRisk, maxTier, type ParsedPr, parsePrBody, PR_TEMPLATE, type RiskFile, riskFloor, type Tier } from "./prtemplate.ts";
 import { Approvals, audit, Branches, type Loop, Loops, type Memory, Memories, Parked, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
 
 const run = promisify(execFile);
@@ -633,6 +633,31 @@ async function checksFor(repo: string, sha: string, context: Context): Promise<P
 	return checks;
 }
 
+/**
+ * What a package.json change touches, from the parsed base and head versions (not the diff text): keys other than
+ * `scripts` (dependencies, overrides, engines, packageManager…) need a human; scripts-only is a normal, reviewed PR.
+ */
+export function packageJsonChange(base: string | undefined, head: string | undefined): { changedKeys: string[]; parseError?: string } {
+	let before: Record<string, unknown>;
+	let after: Record<string, unknown>;
+	try {
+		before = base === undefined ? {} : (JSON.parse(base) as Record<string, unknown>);
+		after = head === undefined ? {} : (JSON.parse(head) as Record<string, unknown>);
+	} catch (error) {
+		return { changedKeys: [], parseError: (error as Error).message };
+	}
+	const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+	return { changedKeys: [...keys].filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key])).sort() };
+}
+
+async function fileAt(repo: string, path: string, ref: string, context: Context): Promise<string | undefined> {
+	try {
+		return await gh(["api", `repos/${repo}/contents/${path}?ref=${ref}`, "-H", "Accept: application/vnd.github.raw"], context);
+	} catch {
+		return undefined;
+	}
+}
+
 /** Unresolved review threads (a read-only GraphQL query by the daemon). */
 async function unresolvedThreadsOf(repo: string, number: number, context: Context): Promise<{ path?: string; line?: number; body?: string }[]> {
 	const [owner, name] = repo.split("/");
@@ -669,6 +694,19 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 	if (pr.additions + pr.deletions > rules.maxChangedLines) needsHuman.push(`${pr.additions + pr.deletions} lines > ${rules.maxChangedLines}`);
 	const touched = protectedMatches(files.flatMap((f) => [f.filename, ...(f.previous_filename ? [f.previous_filename] : [])]), rules.protectedPaths);
 	if (touched.length > 0) needsHuman.push(`protected paths: ${touched.join(", ")}`);
+	// package.json: scripts-only changes are reviewed like code (and at least medium); anything else waits for Tony.
+	let scriptsChanged = false;
+	for (const file of files.filter((f) => f.filename === "package.json" || f.filename.endsWith("/package.json"))) {
+		const change = packageJsonChange(await fileAt(repo, file.previous_filename ?? file.filename, pr.baseRefName, context), await fileAt(repo, file.filename, pr.headRefOid, context));
+		const beyondScripts = change.changedKeys.filter((key) => key !== "scripts");
+		if (change.parseError !== undefined) needsHuman.push(`${file.filename} could not be parsed: ${change.parseError}`);
+		else if (beyondScripts.length > 0) needsHuman.push(`${file.filename} changes ${beyondScripts.join(", ")} (only scripts may change without a human)`);
+		else if (change.changedKeys.includes("scripts")) scriptsChanged = true;
+	}
+	if (scriptsChanged) {
+		tier.tier = maxTier(tier.tier, "medium");
+		tier.reasons.push("package.json scripts changed");
+	}
 	if (parsed.missing.length > 0) needsHuman.push(`PR description is missing: ${parsed.missing.join(", ")}`);
 	if (parsed.testing?.ranNothing) needsHuman.push("Testing says nothing was run");
 	// The review covers this exact commit AND this exact description: editing either needs a fresh review.

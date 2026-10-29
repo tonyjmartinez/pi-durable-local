@@ -70,13 +70,15 @@ describe("protectedMatches with the default policy", () => {
 	});
 
 	it("protects dependency and build manifests", () => {
-		for (const file of ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Makefile"]) {
+		for (const file of ["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Makefile"]) {
 			assert.ok(hit(file), `${file} should be protected`);
 		}
+		// package.json is checked key by key at the gate (scripts-only is reviewed; anything else needs a human).
+		assert.ok(!hit("package.json"));
 	});
 
 	it("protects the same files in a monorepo subpackage", () => {
-		for (const file of ["packages/worker/package.json", "packages/worker/wrangler.jsonc", "apps/web/Makefile"]) {
+		for (const file of ["packages/worker/wrangler.jsonc", "apps/web/Makefile", "packages/worker/Cargo.toml"]) {
 			assert.ok(hit(file), `${file} should be protected`);
 		}
 	});
@@ -113,5 +115,22 @@ describe("protectedMatches with the default policy", () => {
 	it("is not fooled by path look-alikes", () => {
 		assert.ok(!hit("src/not.github/x.yml"));
 		assert.ok(!hit("my.husky-notes.md"));
+	});
+});
+
+describe("packageJsonChange", async () => {
+	const { packageJsonChange } = await import("../src/extensions.ts");
+	it("reports scripts-only changes", () => {
+		assert.deepEqual(packageJsonChange('{"scripts":{"a":"x"},"dependencies":{"d":"1"}}', '{"scripts":{"a":"x","test":"y"},"dependencies":{"d":"1"}}'), { changedKeys: ["scripts"] });
+	});
+	it("reports dependency, override and engine changes", () => {
+		assert.deepEqual(packageJsonChange('{"dependencies":{"d":"1"}}', '{"dependencies":{"d":"2"}}').changedKeys, ["dependencies"]);
+		assert.deepEqual(packageJsonChange('{}', '{"overrides":{"x":"1"},"engines":{"node":">=22"}}').changedKeys, ["engines", "overrides"]);
+	});
+	it("treats a new package.json as changing every key it has", () => {
+		assert.deepEqual(packageJsonChange(undefined, '{"name":"x","scripts":{}}').changedKeys, ["name", "scripts"]);
+	});
+	it("flags unparseable JSON", () => {
+		assert.ok(packageJsonChange("{", "{}").parseError);
 	});
 });
