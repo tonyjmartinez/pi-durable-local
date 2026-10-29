@@ -20,7 +20,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
-import { Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, Sessions_, setHarness, Web_ } from "./extensions.ts";
+import { dryRunGates, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, Sessions_, setHarness, Web_ } from "./extensions.ts";
 import { audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -306,6 +306,7 @@ const routes: [string, RegExp, Route][] = [
 	["GET", /^\/loops$/, async () => Object.values((await harness.snapshot(Loops, context))?.byId ?? {})],
 	["POST", /^\/loops$/, (_m, body) => startLoop(body)],
 	["POST", /^\/loops\/([^/]+)\/(pause|resume|stop)$/, (m) => setLoopStatus(m[1]!, m[2]!)],
+	["POST", /^\/gates$/, async (_m, body) => dryRunGates(String(body.repo), Number(body.number), models, context)],
 	["POST", /^\/tasks\/([^/]+)\/retry$/, async (m) => {
 		await harness.retryTask(m[1] as never, context);
 		return { retried: m[1] };

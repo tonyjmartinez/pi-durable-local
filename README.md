@@ -1,6 +1,6 @@
 # pi-durable-local
 
-Durable coding-agent sessions that keep running on your machine, built on `pi-durable`.
+A small, portable software factory: durable coding-agent sessions that keep running on your machine, built on `pi-durable`. Agents take work from idea to merged PR inside a sandbox, under budgets and merge gates you control. Clone it onto any Linux or WSL box, run `scripts/install.sh`, add one API key, and it runs locally.
 
 One daemon, `pdd`, owns a pi-durable SQLite store at `~/.local/share/pi-durable/state.sqlite`. A small client, `pd`, talks to it over a Unix socket (`~/.local/share/pi-durable/pdd.sock`, mode 0600). Everything lives in the daemon:
 
@@ -8,7 +8,7 @@ One daemon, `pdd`, owns a pi-durable SQLite store at `~/.local/share/pi-durable/
 - **Shared memory.** One durable document that every session reads in its system prompt (project-scoped entries only where they apply) and writes through `memory_save`, `memory_search`, and `memory_forget`.
 - **Cross-session messaging.** `sessions_list` and `session_send` let sessions hand work to each other.
 - **Loops.** A session can be woken on an interval to push a goal forward, within a dollar budget and an iteration cap.
-- **Safeguards.** A tool-call guard, a scrubbed shell environment, an audit log, and a gated `pr_merge` tool that is the only way an agent merges anything.
+- **Safeguards.** Every agent shell runs in a bubblewrap sandbox with no credentials. The daemon pushes and opens PRs on the agents' behalf, a gated `pr_merge` tool is the only way anything merges, and an audit log records every decision.
 - **Web access.** `web_search` (Anthropic server-side search) and `web_fetch` (public http(s) only; private and local addresses are blocked).
 
 Why one process: pi-durable has no cross-process locking on its store. Two processes opening the same SQLite file would corrupt each other's state, so exactly one daemon opens it and everything else goes through the socket.
@@ -88,21 +88,24 @@ Agents may only push branches that start with the branch prefix (`pd/` by defaul
 
 ## Auto-merge gates
 
-Agents cannot run `gh pr merge`. They call the `pr_merge` tool with `repo` (owner/repo) and PR number, which checks every gate below. If any fails, the PR stays open, a comment listing the reasons is posted on it, and the refusal is audited. If all pass, it merges with the configured method, deletes the branch, and pins the merge to the reviewed head commit (`--match-head-commit`).
+Agents never hold GitHub credentials. They commit locally and call tools that the daemon runs with its own login:
+
+- `git_push` pushes a `pd/` work branch. The daemon fetches it from the agent's repo into a bare mirror it owns, then pushes from the mirror to the remote recorded when the session was created. It never runs git with agent-controlled config or hooks.
+- `pr_create` pushes and opens a PR against the repo's deploy branch. `pr_status` and `pr_list` read PRs and CI.
+- `pr_merge` checks every gate below. If any fails, the PR stays open, a comment listing the reasons is posted, and the refusal is audited. If all pass, it merges pinned to the checked head commit (`--match-head-commit`).
 
 1. The repo is in `automerge.repos`.
-2. The PR is open and not a draft.
-3. The base branch is the repo's default branch.
+2. The PR is open, not a draft, not from a fork, and authored by the daemon's own account.
+3. The base is the deploy branch: `automerge.baseBranches[repo]` if set, else the GitHub default branch.
 4. The head branch starts with `automerge.branchPrefix`.
-5. GitHub reports the PR as mergeable.
-6. No reviewer has requested changes.
-7. Added plus deleted lines are at most `maxChangedLines`.
-8. Changed files are at most `maxChangedFiles`.
-9. No changed file matches `protectedPaths`.
-10. No check is failing or cancelled.
-11. No check is still pending.
-12. If `requireChecks` is true, at least one check passed. A repo with no CI is never auto-merged.
-13. If `requireAiReview` is true and everything above passed, an independent model (`reviewModel`) reads the PR title, body, and diff (clipped at 200,000 characters) and must approve. Any doubt, unparseable reply, or missing model counts as a rejection.
+5. GitHub reports it mergeable, and no reviewer requested changes.
+6. The description has a `Verification:` section and a `Door: two-way` line. One-way-door changes (migrations, deletions, public API, dependencies, infrastructure) are always left for a human.
+7. Added plus deleted lines ≤ `maxChangedLines`, files ≤ `maxChangedFiles`.
+8. No changed file matches `protectedPaths`, checking both sides of a rename. Defaults include CI config, env and key files, migrations, Dockerfiles, Terraform, every `package.json` and lockfile, Makefiles, test-runner configs, git hooks, `wrangler.*`, `AGENTS.md`.
+9. CI on the exact head commit: nothing failing or pending, and (with `requireChecks`) at least one passing GitHub Actions check run. Commit statuses never count as a pass, because anyone with a token can post one.
+10. With `requireAiReview`, an independent model (`reviewModel`) reviews the title, description and diff, treating them as untrusted data. Any conflicting, unparseable, or missing verdict is a rejection.
+
+Try the gates on a real PR without merging: `pd gates owner/repo 54` runs all of them, including the AI review, even for a repo that is not allowlisted.
 
 To enable a repo, add it to the allowlist in `~/.config/pi-durable/policy.json`:
 
@@ -114,26 +117,23 @@ The file is read live, so no restart is needed. The allowlist is empty by defaul
 
 ## Safeguards
 
-Every tool call in every session passes through the guard before it runs. Blocked calls are returned to the agent as a refusal and written to the audit log.
+**The sandbox (structural).** Every agent shell command runs through `bin/agent-shell`, which is bash inside bubblewrap:
 
-- **Bash rules.** Blocks: `sudo`; recursive deletes of `/` or a home directory; disk formatting and writes to block devices; fork bombs; piping downloads into a shell or interpreter; `chmod 777 /`; force pushes (except `--force-with-lease`), `--mirror`/`--all`/`--delete`/`--tags` pushes, and remote branch deletion; `--no-verify`; global git config changes; `gh pr merge` and merge API calls; repo administration (`gh repo delete/archive/rename/edit`, `gh secret`, `gh auth`, ssh/gpg keys, releases, workflows, rulesets); mutating `gh api` calls; publishing packages or images; controlling the `pi-durable` service or killing node; editing crontab.
-- **Pushes.** `git push` must name a branch explicitly, and that branch must start with the work prefix. Bare `git push`, `HEAD`, and `main` are refused.
-- **Secret paths.** No read or write of `~/.ssh`, `~/.config/pi-durable`, `~/.config/gh`, `~/.pi/agent/auth.json`, `~/.aws`, `~/.gnupg`, `~/.npmrc`, `~/.netrc`, `~/.git-credentials`, or `gh auth token`. Reading `.env` files with common tools is blocked.
-- **Writes.** `write` and `edit` only inside `writableRoots` (default `~/proj` and `/tmp`), never `.env` files (`.env.example` is fine), never `.git` internals.
-- **Scrubbed environment.** The daemon loads the env file into its own process for the model providers. Agent shells get the daemon's environment minus any variable whose name contains KEY, TOKEN, SECRET, PASSWORD, CREDENTIAL, or AUTH. `gh` keeps its own login in `~/.config/gh`.
-- **Audit log.** Blocks, merges, refusals, merge errors, loop events, and daemon-reported errors are appended to `~/.local/share/pi-durable/audit.jsonl`. `pd audit` shows the last 200 entries.
+- Credentials and daemon state are hidden behind empty tmpfs mounts: `~/.ssh`, `~/.config/pi-durable`, `~/.config/gh`, `~/.local/share/pi-durable`, `~/.claude*`, `~/.pi`, cloud CLI configs, `~/.npmrc`, `~/.netrc`, `~/.git-credentials`, and `/run/user` (so agents can't reach other local sockets).
+- `$HOME` is read-only except the writable roots (`~/proj` by default), `/tmp`, and package caches. This repo, the daemon's own code and guard, is read-only even though it sits under `~/proj`, so agents can't edit their own rules or add shell-startup persistence.
+- A private PID namespace: other processes, including the daemon and its environment, are invisible.
+- The network stays on for package installs and docs. Agents have no credentials to use it against your accounts.
+- If bubblewrap is missing, agent commands refuse to run unless `PD_ALLOW_UNSANDBOXED=1` is set for the daemon.
+
+**The guard (defense in depth).** Every tool call also passes a pattern-based guard first; blocks are returned to the agent and audited. It blocks `sudo`, destructive deletes, disk tools, running downloaded code, force/mirror/delete pushes, pushes to anything but `origin` `pd/…`, git aliases and remote changes, `--no-verify`, all `gh` writes (`pr merge|review|edit`, `api` with any method other than GET, `api graphql`, `alias`, `config`, `auth`, repo administration), publishing, touching the daemon, and secret paths named directly or by directory fragment. `read`, `write`, and `edit` resolve symlinks before checking, are confined to the writable roots, and never touch `.env` files or `.git` internals.
+
+**The audit log.** Blocks, pushes, PRs, merges, refusals, gate dry runs, loop events, and daemon errors are appended to `~/.local/share/pi-durable/audit.jsonl` (mode 600). `pd audit` shows the latest.
 
 ### Limits
 
-The bash guard is pattern matching on the command text. It is best effort, not a sandbox. A determined or confused agent can write a command that no pattern anticipates (a script file that does the forbidden thing, an encoded command, an unusual tool). Treat the guard as a seatbelt that catches common mistakes.
-
-The real backstops are structural:
-
-- No secrets are in the agent's environment, and the guard blocks the files that hold them (this is also pattern based, but the secrets are not in the shell to begin with).
-- Pushes go only to `pd/` branches, so main is never written directly by the agent.
-- Merges happen only through the gated `pr_merge` tool.
-
-Add GitHub branch protection on `main` for every repo agents work in: require pull requests and require passing CI. That makes the server enforce what the guard only checks locally. Agents run as your user with your `gh` login, so anything that login can do is within reach of a guard bypass; use a repo-scoped or limited token if you want a smaller blast radius.
+- `read`, `write`, `edit`, and `web_fetch` run inside the daemon, not the sandbox; they are covered by the guard's path checks only.
+- The sandbox is Linux-only (bubblewrap). On macOS there is no equivalent yet.
+- On private repos without GitHub Pro, branch protection and rulesets are unavailable, so `pr_merge`'s gates are the only thing standing between an agent's PR and the deploy branch. On repos where you can, also enable branch protection on the deploy branch (require PRs and passing CI) so GitHub enforces it server-side.
 
 ## Policy file reference
 
@@ -145,8 +145,9 @@ Add GitHub branch protection on `main` for every repo agents work in: require pu
 | `reviewModel` | `anthropic/claude-opus-5-5` | Model for the AI review gate |
 | `searchModel` | `anthropic/claude-opus-5-5` | Model that runs `web_search` |
 | `thinkingLevel` | `medium` | `off`, `minimal`, `low`, `medium`, or `high` |
-| `writableRoots` | `~/proj`, `/tmp` | Where `write` and `edit` are allowed |
+| `writableRoots` | `~/proj`, `/tmp` | Where `write`/`edit` are allowed and what the sandbox mounts writable (restart to apply to the sandbox) |
 | `automerge.repos` | `[]` | `owner/repo` allowlist for `pr_merge` |
+| `automerge.baseBranches` | `{}` | `owner/repo` → branch PRs target, when the GitHub default is not the deploy branch |
 | `automerge.branchPrefix` | `pd/` | Required prefix for agent branches and PR heads |
 | `automerge.maxChangedLines` | `600` | Additions plus deletions limit |
 | `automerge.maxChangedFiles` | `25` | Changed file limit |
@@ -158,7 +159,7 @@ Add GitHub branch protection on `main` for every repo agents work in: require pu
 | `loops.defaultIntervalMinutes` | `60` | Time between iterations |
 | `loops.defaultMaxIterations` | `20` | Iteration cap |
 
-Default `protectedPaths`: `.github/**`, `**/.env*`, `**/*.pem`, `**/*.key`, `**/secrets/**`, `**/migrations/**`, `**/Dockerfile`, `**/*.tf`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `CODEOWNERS`, `.pi/**`, `AGENTS.md`. In globs, `**` spans directories and `*` stays within one. Setting `protectedPaths` replaces the list, it does not extend it.
+Default `protectedPaths`: see gate 8 above and `DEFAULT_POLICY` in `src/config.ts`. In globs, `**` spans directories and `*` stays within one. Setting `protectedPaths` replaces the list, it does not extend it.
 
 `model`, `thinkingLevel`, and `writableRoots` apply to new sessions and to guard checks as they happen. Change a running session's model with `/model` in `pd attach`.
 

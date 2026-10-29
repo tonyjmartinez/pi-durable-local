@@ -6,7 +6,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Context } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { type Models, Type } from "@earendil-works/pi-ai";
 import {
 	defineExtension,
 	defineTask,
@@ -621,6 +621,40 @@ async function prSummary(repo: string, number: number, context: Context): Promis
 	return `#${pr.number} ${pr.title} [${pr.state}${pr.isDraft ? ", draft" : ""}] ${pr.headRefName} → ${pr.baseRefName}\n${pr.url}\n+${pr.additions} −${pr.deletions} in ${pr.changedFiles} files, mergeable=${pr.mergeable}, review=${pr.reviewDecision || "none"}\nChecks on ${pr.headRefOid.slice(0, 7)}:\n${checks}`;
 }
 
+/** The independent reviewer: a separate model call that sees only the PR, framed as untrusted data. */
+export function reviewWith(models: Models, policy: Policy, context: Context) {
+	return async (pr: PrView, diff: string): Promise<{ approve: boolean; reasons: string[] }> => {
+		const ref = splitModel(policy.reviewModel);
+		const model = models.getModels().find((m) => m.provider === ref.provider && m.id === ref.modelId);
+		if (model === undefined) return { approve: false, reasons: [`review model ${policy.reviewModel} not found`] };
+		const clipped = diff.length > 200_000 ? `${diff.slice(0, 200_000)}\n…(diff truncated)` : diff;
+		const answer = await models.completeSimple(
+			model,
+			{
+				systemPrompt: REVIEW_PROMPT,
+				messages: [
+					{
+						role: "user",
+						content: `<pr_title>${pr.title}</pr_title>\n<pr_description>\n${pr.body}\n</pr_description>\n<diff>\n${clipped}\n</diff>`,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{ signal: context.abortSignal },
+		);
+		return parseVerdict(answer.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
+	};
+}
+
+/** Every gate pr_merge would run, without merging, ignoring the allowlist: for trying a repo before enabling it. */
+export async function dryRunGates(repo: string, number: number, models: Models, context: Context) {
+	const policy = loadPolicy();
+	const trial: Policy = { ...policy, automerge: { ...policy.automerge, repos: [...policy.automerge.repos, repo] } };
+	const { result } = await evaluateMergeGates(repo, number, trial, reviewWith(models, trial, context), context);
+	audit("gates_dry_run", { repo, pr: number, ok: result.ok, ...(result.ok ? {} : { reasons: result.reasons }) });
+	return { allowlisted: policy.automerge.repos.includes(repo), ...result };
+}
+
 export const Git_ = defineExtension({
 	name: "pdl.git",
 	tools: [
@@ -715,27 +749,7 @@ export const Git_ = defineExtension({
 			execute: async (args, api, context) => {
 				const policy = loadPolicy();
 				const { name } = await sessionCwd(api, api.conversationId, context);
-				const review = async (pr: PrView, diff: string) => {
-					const ref = splitModel(policy.reviewModel);
-					const model = api.models.getModels().find((m) => m.provider === ref.provider && m.id === ref.modelId);
-					if (model === undefined) return { approve: false, reasons: [`review model ${policy.reviewModel} not found`] };
-					const clipped = diff.length > 200_000 ? `${diff.slice(0, 200_000)}\n…(diff truncated)` : diff;
-					const answer = await api.models.completeSimple(
-						model,
-						{
-							systemPrompt: REVIEW_PROMPT,
-							messages: [
-								{
-									role: "user",
-									content: `<pr_title>${pr.title}</pr_title>\n<pr_description>\n${pr.body}\n</pr_description>\n<diff>\n${clipped}\n</diff>`,
-									timestamp: Date.now(),
-								},
-							],
-						},
-						{ signal: context.abortSignal },
-					);
-					return parseVerdict(answer.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
-				};
+				const review = reviewWith(api.models, policy, context);
 				let gates: Awaited<ReturnType<typeof evaluateMergeGates>>;
 				try {
 					gates = await evaluateMergeGates(args.repo, args.number, policy, review, context);

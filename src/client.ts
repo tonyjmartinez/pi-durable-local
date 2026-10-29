@@ -290,6 +290,7 @@ const HELP = `pd — pi-durable sessions that keep running
   pd mem add "topic" "fact" [--project <dir>]
   pd mem rm <id>
 
+  pd gates <owner/repo> <pr>                dry-run every merge gate (incl. AI review), no merge
   pd audit                                  safety decisions and merges
   pd retry <taskId>                         rerun a parked task
   pd doctor                                 check setup`;
@@ -371,6 +372,12 @@ async function main(argv: string[]): Promise<void> {
 				console.log(`${c.dim(e.at.slice(0, 19))} ${color(e.event.padEnd(14))} ${e.session ?? e.loop ?? ""} ${e.reason ?? e.repo ?? ""}${e.pr ? `#${e.pr}` : ""} ${e.reasons ? e.reasons.join("; ") : e.note ?? e.tool ?? ""}`);
 			}
 			return;
+		case "gates": {
+			const result = await call("POST", "/gates", { repo: positional[0], number: Number(positional[1]) });
+			console.log(result.ok ? c.green(`✓ all gates pass: ${result.summary}`) : c.yellow(`✗ would be held:\n  - ${result.reasons.join("\n  - ")}`));
+			if (!result.allowlisted) console.log(c.dim(`(${positional[0]} is not in automerge.repos, so pr_merge would refuse it regardless)`));
+			return;
+		}
 		case "retry":
 			await call("POST", `/tasks/${positional[0]}/retry`);
 			console.log("retrying");
