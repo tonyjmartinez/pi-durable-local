@@ -52,7 +52,7 @@ export const DEFAULT_POLICY: Policy = {
 	model: "anthropic/claude-opus-5-5",
 	reviewModel: "anthropic/claude-opus-5-5",
 	searchModel: "anthropic/claude-opus-5-5",
-	subagentModel: "anthropic/claude-sonnet-5-5",
+	subagentModel: "anthropic/claude-haiku-5-5",
 	thinkingLevel: "medium",
 	writableRoots: [join(home, "proj"), "/tmp"],
 	automerge: {
@@ -92,7 +92,7 @@ export const DEFAULT_POLICY: Policy = {
 		requireAiReview: true,
 		mergeMethod: "squash",
 	},
-	loops: { defaultBudgetUsd: 5, defaultIntervalMinutes: 60, defaultMaxIterations: 20 },
+	loops: { defaultBudgetUsd: 5, defaultIntervalMinutes: 60, defaultMaxIterations: 24 },
 };
 
 export function ensureDirs(): void {

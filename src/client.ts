@@ -291,6 +291,7 @@ const HELP = `pd — pi-durable sessions that keep running
 
   pd loop start <session> "goal" [--every 60] [--max 20] [--budget 5]
   pd loop ls | pause <id> | resume <id> | stop <id>
+  pd loop set <id> [--every 60] [--max 24] [--budget 5]
 
   pd mem [search words]                     shared memory
   pd mem add "topic" "fact" [--project <dir>]
@@ -379,6 +380,15 @@ async function main(argv: string[]): Promise<void> {
 				});
 				printLoop(loop);
 			} else if (sub === "ls") for (const loop of await call("GET", "/loops")) printLoop(loop);
+			else if (sub === "set") {
+				printLoop(
+					await call("POST", `/loops/${loopArgs[0]}/set`, {
+						intervalMinutes: opts.every ? Number(opts.every) : undefined,
+						maxIterations: opts.max ? Number(opts.max) : undefined,
+						budgetUsd: opts.budget ? Number(opts.budget) : undefined,
+					}),
+				);
+			}
 			else printLoop(await call("POST", `/loops/${loopArgs[0]}/${sub}`));
 			return;
 		}

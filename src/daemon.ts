@@ -336,6 +336,23 @@ const routes: [string, RegExp, Route][] = [
 		}, context)],
 	["GET", /^\/loops$/, async () => Object.values((await harness.snapshot(Loops, context))?.byId ?? {})],
 	["POST", /^\/loops$/, (_m, body) => startLoop(body)],
+	["POST", /^\/loops\/([^/]+)\/set$/, async (m, body) => {
+		const id = m[1]!;
+		const updated = await harness.commit(async (tx) => {
+			const loop = (await tx.doc(Loops)).byId[id];
+			if (loop === undefined) return undefined;
+			if (typeof body.intervalMinutes === "number" && body.intervalMinutes >= 5) {
+				loop.intervalMinutes = body.intervalMinutes;
+				// Takes effect after the iteration already scheduled.
+			}
+			if (typeof body.maxIterations === "number" && body.maxIterations >= 1) loop.maxIterations = body.maxIterations;
+			if (typeof body.budgetUsd === "number" && body.budgetUsd > 0) loop.budgetUsd = body.budgetUsd;
+			return JSON.parse(JSON.stringify(loop)) as Loop;
+		}, context);
+		if (updated === undefined) throw new HttpError(404, `no loop ${id}`);
+		audit("loop_set", { loop: id, intervalMinutes: updated.intervalMinutes, maxIterations: updated.maxIterations, budgetUsd: updated.budgetUsd });
+		return updated;
+	}],
 	["POST", /^\/loops\/([^/]+)\/(pause|resume|stop)$/, (m) => setLoopStatus(m[1]!, m[2]!)],
 	["POST", /^\/approve$/, async (_m, body) => {
 		const repo = String(body.repo);

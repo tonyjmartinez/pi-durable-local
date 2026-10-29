@@ -1,6 +1,7 @@
 // Every extension the daemon installs: coding context, shared memory, cross-session messaging, web access,
 // the gated PR merge, project loops, and the safety guard.
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -565,7 +566,8 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 	if (touched.length > 0) needsHuman.push(`protected paths: ${touched.join(", ")}`);
 	if (parsed.missing.length > 0) needsHuman.push(`PR description is missing: ${parsed.missing.join(", ")}`);
 	if (parsed.testing?.ranNothing) needsHuman.push("Testing says nothing was run");
-	const reviewKey = `${repo}#${number}@${pr.headRefOid}`;
+	// The review covers this exact commit AND this exact description: editing either needs a fresh review.
+	const reviewKey = `${repo}#${number}@${pr.headRefOid}:${createHash("sha256").update(`${pr.title}\n${pr.body ?? ""}`).digest("hex").slice(0, 16)}`;
 	const review = (await reader.snapshot(Reviews, context))?.byHead[reviewKey];
 	const approval = (await reader.snapshot(Approvals, context))?.byPr[`${repo}#${number}`];
 	const state: PrTickState = {
@@ -800,6 +802,35 @@ export const Git_ = defineExtension({
 				} catch (error) {
 					return fail(`Could not open the PR: ${String((error as { stderr?: string }).stderr || error).slice(0, 600)}`);
 				}
+			},
+		}),
+		defineTool({
+			name: "pr_edit",
+			description:
+				"Replace the title and/or description of one of your own open PRs (e.g. to fill in the template or correct a claim). Any edit means the independent review runs again.",
+			parameters: Type.Object({
+				number: Type.Number(),
+				title: Type.Optional(Type.String()),
+				body: Type.Optional(Type.String({ description: "The full new description; must fill every template field" })),
+			}),
+			execute: async (args, api, context) => {
+				const policy = loadPolicy();
+				const session = await sessionInfo(api, api.conversationId, context);
+				const repo = githubRepoOf(session?.info.remote);
+				if (session === undefined || repo === undefined) return fail("This session has no GitHub repo.");
+				const pr = JSON.parse(await gh(["pr", "view", String(args.number), "--repo", repo, "--json", "state,headRefName,author,isCrossRepository"], context)) as {
+					state: string; headRefName: string; author: { login: string }; isCrossRepository: boolean;
+				};
+				if (pr.state !== "OPEN" || pr.isCrossRepository || !pr.headRefName.startsWith(policy.automerge.branchPrefix) || pr.author.login !== (await viewerLogin(context))) {
+					return fail("You can only edit your own open work-branch PRs.");
+				}
+				if (args.body !== undefined) {
+					const parsed = parsePrBody(args.body);
+					if (parsed.missing.length > 0) return fail(`The description is missing: ${parsed.missing.join(", ")}. Template:\n\n${PR_TEMPLATE}`);
+				}
+				await gh(["pr", "edit", String(args.number), "--repo", repo, ...(args.title ? ["--title", args.title] : []), ...(args.body ? ["--body", args.body] : [])], context);
+				audit("pr_edited", { session: session.name, repo, pr: args.number });
+				return text(`Updated #${args.number}. Call pr_tick to continue.`);
 			},
 		}),
 		defineTool({
