@@ -606,11 +606,12 @@ async function checksFor(repo: string, sha: string, context: Context): Promise<P
 			: run.conclusion === "skipped" || run.conclusion === "neutral" ? "skipping"
 			: run.conclusion === "cancelled" ? "cancel"
 			: "fail";
-		checks.push({ name: run.name, bucket });
+		// The source is part of the name, so a failure can be told apart: the agent's tests vs another app's check.
+		checks.push({ name: run.app?.slug === "github-actions" ? run.name : `${run.name} [${run.app?.slug ?? "external"}]`, bucket });
 	}
 	for (const status of statuses) {
 		// A commit status can be posted by anyone with a token: it can block, never pass.
-		checks.push({ name: status.context, bucket: status.state === "pending" ? "pending" : status.state === "success" ? "skipping" : "fail" });
+		checks.push({ name: `${status.context} [commit status]`, bucket: status.state === "pending" ? "pending" : status.state === "success" ? "skipping" : "fail" });
 	}
 	return checks;
 }
@@ -695,6 +696,19 @@ export const SHIP_OPTIONS: Partial<PrTickOptions> = {
 	requireChecks: true,
 };
 
+/**
+ * decidePr with one factory rule on top: failures only in checks from other apps (a Cloudflare build, a commit
+ * status) are not the agent's to fix, so the PR parks for Tony instead. Still blocked, never ignored.
+ */
+export function decideShip(state: PrTickState): PrDecision {
+	const decision = decidePr(state, SHIP_OPTIONS);
+	const failing = decision.details ?? [];
+	if (decision.action === "fix-ci" && failing.length > 0 && failing.every((name) => / \[[^\]]+\]$/.test(name))) {
+		return { action: "park-human", reason: "only checks from outside GitHub Actions are failing; the agent cannot fix those", details: failing };
+	}
+	return decision;
+}
+
 export type TickOutcome = { decision: PrDecision; facts: ShipFacts; merged?: boolean; reviewed?: boolean; firstPark?: boolean };
 
 /**
@@ -711,7 +725,7 @@ export async function tickPr(
 ): Promise<TickOutcome> {
 	const policy = loadPolicy();
 	let facts = await gatherShipFacts(repo, number, policy, harnessLike, context);
-	let decision = decidePr(facts.state, SHIP_OPTIONS);
+	let decision = decideShip(facts.state);
 	let reviewed = false;
 	const runReview = async () => {
 		const sha = facts.pr.headRefOid;
@@ -728,7 +742,7 @@ export async function tickPr(
 		audit("reviewed", { session: options.session, repo, pr: number, sha, approve: verdict.approve, reasons: verdict.reasons });
 		reviewed = true;
 		facts = await gatherShipFacts(repo, number, policy, harnessLike, context);
-		decision = decidePr(facts.state, SHIP_OPTIONS);
+		decision = decideShip(facts.state);
 	};
 	// Foreign PRs (forks, other authors, non-work branches) never get a review: no spend on PRs we don't own.
 	const foreign = facts.pr.isCrossRepository || facts.pr.author.login !== (await viewerLogin(context)) || !facts.pr.headRefName.startsWith(policy.automerge.branchPrefix);

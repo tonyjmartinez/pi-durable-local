@@ -305,9 +305,15 @@ describe("what counts as passing CI", () => {
 	});
 
 	it("blocks on a failing status or run", async () => {
+		// Only an outside check failing: still blocked, but parked for a human; the agent can't fix it.
 		script({ statuses: [{ context: "ci/external", state: "failure" }] });
-		assert.equal((await tick(fakeModels([APPROVE]))).decision.action, "fix-ci");
+		const external = (await tick(fakeModels([APPROVE]))).decision;
+		assert.equal(external.action, "park-human");
+		assert.deepEqual(external.details, ["ci/external [commit status]"]);
 		script({ runs: [ok("ci", "success"), ok("e2e", "failure")] });
+		assert.equal((await tick(fakeModels([APPROVE]))).decision.action, "fix-ci");
+		// An Actions failure alongside an outside one is the agent's to fix.
+		script({ runs: [ok("e2e", "failure"), ok("deploy", "failure", "cloudflare-workers-and-pages")] });
 		assert.equal((await tick(fakeModels([APPROVE]))).decision.action, "fix-ci");
 	});
 
