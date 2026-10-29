@@ -41,7 +41,7 @@ const BASH_RULES: Rule[] = [
 	{ pattern: /\bdd\s+[^|;&]*of=\/dev\//, reason: "writing to a block device" },
 	{ pattern: /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:/, reason: "fork bomb" },
 	{ pattern: /\b(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(ba|z|da)?sh\b/, reason: "piping a download into a shell" },
-	{ pattern: /\b(ba|z|da)?sh\s+<\(\s*(curl|wget)\b|\beval\s+["']?\$\(\s*(curl|wget)\b|\b(curl|wget)\b[^|;&]*\|\s*(python3?|node|perl|ruby)\b/, reason: "running downloaded code" },
+	{ pattern: /\b(ba|z|da)?sh\s+<\(\s*(curl|wget)\b|\beval\s+["']?\$\(\s*(curl|wget)\b|\b(curl|wget)\b[^|;&]*\|\s*(python3?|node|perl|ruby)\b(?!\s+-[ce]\s)/, reason: "running downloaded code" },
 	{ pattern: /\brm\b[^;&|]*\s(\/\*?|~\/?\*?)(\s|$)/, reason: "deleting / or a home directory" },
 	{ pattern: /\bchmod\s+(-R\s+)?[0-7]*777\s+\/(\s|$)/, reason: "chmod 777 on /" },
 	{ pattern: /\bgit\s+push\b[^;&|]*(\s--force(?!-with-lease)\b|\s-f\b|\s\+\S)/, reason: "force push (use --force-with-lease on your own work branch if you must)" },
