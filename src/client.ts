@@ -257,6 +257,9 @@ function doctor(): void {
 	ok("autostart on login", readFileSync(`${process.env.HOME}/.profile`, "utf8").includes("pdd-up"), "see README: add the pdd-up line to ~/.profile");
 	ok("daemon socket " + SOCKET_PATH, existsSync(SOCKET_PATH));
 	ok("store " + DB_PATH, existsSync(DB_PATH));
+	const shell = resolve(import.meta.dirname, "..", "bin", "agent-shell");
+	const probe = spawnSync(shell, ["-c", `test -z "$(ls -A ~/.ssh 2>/dev/null)" && ! touch ~/.pd-sandbox-probe 2>/dev/null`], { encoding: "utf8" });
+	ok("agent sandbox (bubblewrap) hides ~/.ssh and makes $HOME read-only", probe.status === 0, "install bubblewrap: sudo apt install bubblewrap");
 	const gh = spawnSync("gh", ["auth", "status"], { encoding: "utf8" });
 	ok("GitHub CLI logged in", gh.status === 0, "gh auth login --git-protocol ssh --web");
 	const policy = JSON.parse(readFileSync(POLICY_FILE, "utf8"));
