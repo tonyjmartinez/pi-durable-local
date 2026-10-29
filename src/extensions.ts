@@ -887,6 +887,12 @@ export function addUsage(a: Usage | undefined, b: Usage | undefined): Usage | un
 
 export const FACTORY_REPO = githubRepoOf(readOriginUrl(fileURLToPath(new URL("..", import.meta.url)))) ?? "tonyjmartinez/pi-durable-local";
 
+/** What a PR description is missing, field by field, with an example of each fix, then the template. */
+function templateProblems(parsed: ParsedPr): string {
+	const hints = parsed.missing.map((field) => `- ${field}: ${parsed.hints[field] ?? "missing"}`).join("\n");
+	return `The PR description needs fixing:\n${hints}\n\nFull template for reference:\n\n${PR_TEMPLATE}`;
+}
+
 /** File one friction issue, or comment on the open one it duplicates. Labels are created on first use. */
 export async function fileFriction(repo: string, input: FrictionInput, context: Context): Promise<{ url?: string; duplicateOf?: number }> {
 	const issue = buildFrictionIssue(input);
@@ -1026,7 +1032,7 @@ export const Git_ = defineExtension({
 				if (repo === undefined) return fail(`origin ${session.info.remote ?? "(none)"} is not a GitHub repo`);
 				const parsed = parsePrBody(args.body);
 				if (parsed.missing.length > 0) {
-					return fail(`The PR description is missing: ${parsed.missing.join(", ")}. Fill in this template:\n\n${PR_TEMPLATE}`);
+					return fail(templateProblems(parsed));
 				}
 				try {
 					await pushWorkBranch(session.name, session.info, args.branch, false, context);
@@ -1067,7 +1073,7 @@ export const Git_ = defineExtension({
 				}
 				if (args.body !== undefined) {
 					const parsed = parsePrBody(args.body);
-					if (parsed.missing.length > 0) return fail(`The description is missing: ${parsed.missing.join(", ")}. Template:\n\n${PR_TEMPLATE}`);
+					if (parsed.missing.length > 0) return fail(templateProblems(parsed));
 				}
 				await gh(["pr", "edit", String(args.number), "--repo", repo, ...(args.title ? ["--title", args.title] : []), ...(args.body ? ["--body", args.body] : [])], context);
 				audit("pr_edited", { session: session.name, repo, pr: args.number });
