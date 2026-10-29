@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Start the pi-durable daemon under a restart loop, unless it is already running.
+# Used instead of systemd on WSL, where WSLg hides the systemd user bus.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+DATA="${PD_DATA_DIR:-$HOME/.local/share/pi-durable}"
+PIDFILE="$DATA/pdd.pid"
+LOG="$DATA/pdd.log"
+NODE="$(command -v node || echo "$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | tail -1)/bin/node")"
+mkdir -p "$DATA"
+
+if [[ "${1:-}" == "stop" ]]; then
+	[[ -f "$PIDFILE" ]] && kill -TERM -- "-$(cat "$PIDFILE")" 2>/dev/null && echo "pdd stopped" || echo "pdd was not running"
+	rm -f "$PIDFILE"
+	exit 0
+fi
+
+if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+	echo "pdd already running (pid $(cat "$PIDFILE"))"
+	exit 0
+fi
+
+# setsid gives the loop its own process group, so `pdd-up stop` takes down the loop and the daemon together.
+setsid bash -c '
+	cd "$1"
+	while true; do
+		"$2" --no-warnings src/daemon.ts >>"$3" 2>&1 || true
+		echo "$(date -Is) pdd exited; restarting in 5s" >>"$3"
+		sleep 5
+	done
+' pdd-up "$ROOT" "$NODE" "$LOG" </dev/null >/dev/null 2>&1 &
+echo $! >"$PIDFILE"
+echo "pdd started (pid $!, log $LOG)"

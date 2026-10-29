@@ -21,7 +21,7 @@ function call(method: string, path: string, body?: unknown): Promise<Json> {
 			});
 		});
 		req.on("error", (error: NodeJS.ErrnoException) =>
-			fail(error.code === "ENOENT" || error.code === "ECONNREFUSED" ? new Error("pdd is not running. Start it: systemctl --user start pi-durable") : error),
+			fail(error.code === "ENOENT" || error.code === "ECONNREFUSED" ? new Error(`pdd is not running. Start it: pdd-up (log: ${SOCKET_PATH.replace(/pdd\.sock$/, "pdd.log")})`) : error),
 		);
 		if (body !== undefined) req.write(JSON.stringify(body));
 		req.end();
@@ -252,14 +252,13 @@ function doctor(): void {
 	const secrets = loadSecrets();
 	ok("ANTHROPIC_API_KEY in " + ENV_FILE, Boolean(secrets.ANTHROPIC_API_KEY), `add: echo 'ANTHROPIC_API_KEY=sk-ant-…' >> ${ENV_FILE}`);
 	ok("policy file " + POLICY_FILE, existsSync(POLICY_FILE));
-	const unit = spawnSync("systemctl", ["--user", "is-active", "pi-durable"], { encoding: "utf8" });
-	ok("pi-durable service active", unit.stdout.trim() === "active", "systemctl --user start pi-durable (logs: journalctl --user -u pi-durable -f)");
+	const pid = spawnSync("bash", ["-c", `kill -0 "$(cat ${DB_PATH.replace(/state\.sqlite$/, "pdd.pid")})" 2>/dev/null`]);
+	ok("pdd supervisor running", pid.status === 0, "pdd-up (log: ~/.local/share/pi-durable/pdd.log)");
+	ok("autostart on login", readFileSync(`${process.env.HOME}/.profile`, "utf8").includes("pdd-up"), "see README: add the pdd-up line to ~/.profile");
 	ok("daemon socket " + SOCKET_PATH, existsSync(SOCKET_PATH));
 	ok("store " + DB_PATH, existsSync(DB_PATH));
 	const gh = spawnSync("gh", ["auth", "status"], { encoding: "utf8" });
 	ok("GitHub CLI logged in", gh.status === 0, "gh auth login --git-protocol ssh --web");
-	const linger = spawnSync("loginctl", ["show-user", process.env.USER ?? "", "--property=Linger"], { encoding: "utf8" });
-	ok("runs without a login session (linger)", linger.stdout.includes("Linger=yes"), "sudo loginctl enable-linger $USER");
 	const policy = JSON.parse(readFileSync(POLICY_FILE, "utf8"));
 	ok(`auto-merge repos: ${policy.automerge.repos.join(", ") || "none (PRs stay open)"}`, true);
 }
@@ -295,8 +294,16 @@ const HELP = `pd — pi-durable sessions that keep running
   pd retry <taskId>                         rerun a parked task
   pd doctor                                 check setup`;
 
+/** Start the daemon through its supervisor when the socket is missing, and wait for it to listen. */
+async function ensureDaemon(): Promise<void> {
+	if (existsSync(SOCKET_PATH)) return;
+	spawnSync(resolve(import.meta.dirname, "..", "bin", "pdd-up"), { stdio: "inherit" });
+	for (let i = 0; i < 40 && !existsSync(SOCKET_PATH); i++) await new Promise((done) => setTimeout(done, 250));
+}
+
 async function main(argv: string[]): Promise<void> {
 	const [command = "status", ...rest] = argv;
+	if (command !== "doctor" && command !== "help") await ensureDaemon();
 	const { positional, opts } = flags(rest);
 	switch (command) {
 		case "status":

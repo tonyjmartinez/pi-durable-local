@@ -24,20 +24,21 @@ npm install
 # Only ANTHROPIC_API_KEY is needed. Web search uses Anthropic's server-side search, so no search key.
 echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.config/pi-durable/env
 
-mkdir -p ~/.local/bin ~/.config/systemd/user
+mkdir -p ~/.local/bin
 ln -sf "$PWD/bin/pd" ~/.local/bin/pd
-ln -sf "$PWD/systemd/pi-durable.service" ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now pi-durable
+ln -sf "$PWD/bin/pdd-up" ~/.local/bin/pdd-up
+pdd-up            # start the daemon under a restart loop (pdd-up stop to stop it)
 
-# Keep the user service running without a login session (needed on WSL).
-sudo loginctl enable-linger $USER
+# Start it whenever WSL opens a login shell:
+echo '[ -x "$HOME/.local/bin/pdd-up" ] && "$HOME/.local/bin/pdd-up" >/dev/null 2>&1' >> ~/.profile
 
-gh auth login
+gh auth login --git-protocol ssh --web
 pd doctor
 ```
 
-The unit file hardcodes the working directory (`%h/proj/pi-durable-local`) and a node path under `~/.nvm`. Edit `systemd/pi-durable.service` if yours differ. If the env file is created empty, the daemon logs a warning until the key is set.
+Why not systemd: on WSL, WSLg mounts its own tmpfs over `/run/user/$UID`, which hides the systemd user bus, so `systemctl --user` cannot connect. `bin/pdd-up` is a small supervisor instead: it runs the daemon in its own process group and restarts it 5 seconds after any exit. `pd` also starts it on demand when the socket is missing. A unit file is kept in `systemd/` for machines where the user bus works.
 
-`pd doctor` checks: the API key, the policy file, the service, the socket, the store, `gh` login, linger, and the auto-merge allowlist.
+`pd doctor` checks: the API key, the policy file, the supervisor, login autostart, the socket, the store, `gh` login, and the auto-merge allowlist.
 
 ## Daily use
 
@@ -163,9 +164,9 @@ Default `protectedPaths`: `.github/**`, `**/.env*`, `**/*.pem`, `**/*.key`, `**/
 
 ## Troubleshooting
 
-- **Logs:** `journalctl --user -u pi-durable -f`
-- **"pdd is not running":** `systemctl --user start pi-durable`, then `pd doctor`.
-- **Service fails to start:** check the node path and working directory in the unit file. After editing it, run `systemctl --user daemon-reload` and restart. A crash loop is limited to 10 starts in 5 minutes.
+- **Logs:** `tail -f ~/.local/share/pi-durable/pdd.log`
+- **"pdd is not running":** `pdd-up`, then `pd doctor`.
+- **Restart after changing code or secrets:** `pdd-up stop && pdd-up`. Every committed step survives the restart.
 - **Parked tasks:** if a task cannot make progress it is parked and listed by `pd status` under "Parked tasks" with its id and reason. Fix the cause, then `pd retry <taskId>`.
 - **Credit balance errors:** if the Anthropic account runs out of credit, model requests fail with a 400 and the message that triggered them is marked unanswered (an attached session shows `[unanswered: ...]`). Nothing is lost: add credit and send the message again. A loop iteration that fails this way is recorded in the loop's note, and the loop tries again at its next interval.
 - **Missing API key:** `pd status` prints a red warning and the daemon logs one at startup. Set `ANTHROPIC_API_KEY` in `~/.config/pi-durable/env` and restart the service (secrets are read at startup; the policy file is not).
