@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# The shell every agent command runs in: bash inside a bubblewrap sandbox.
+# Called as `agent-shell -c "<command>"` from the session's working directory.
+#
+# Inside the sandbox:
+#   - credentials and the daemon's own state are hidden (empty tmpfs over them)
+#   - $HOME is read-only, except the writable roots below and tool caches
+#   - this repo (the daemon's code and guard) is read-only
+#   - a fresh PID namespace, so other processes' environments can't be read
+#   - the network stays on (npm install, web docs); pushes go through the daemon
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+H="$HOME"
+
+if ! command -v bwrap >/dev/null 2>&1; then
+	if [[ "${PD_ALLOW_UNSANDBOXED:-}" == "1" ]]; then
+		exec /bin/bash "$@"
+	fi
+	echo "agent-shell: bubblewrap (bwrap) is not installed; refusing to run agent commands unsandboxed." >&2
+	echo "Install it (sudo apt install bubblewrap) or set PD_ALLOW_UNSANDBOXED=1 in the daemon's environment." >&2
+	exit 126
+fi
+
+args=(
+	--ro-bind / /
+	--dev /dev
+	--proc /proc
+	--tmpfs /run/user
+	--unshare-pid
+	--die-with-parent
+	--new-session
+)
+
+# Writable: project roots (from PD_WRITABLE_ROOTS, colon-separated), temp, and package-manager caches.
+IFS=: read -r -a roots <<<"${PD_WRITABLE_ROOTS:-$H/proj}"
+for dir in "${roots[@]}" /tmp "$H/.npm" "$H/.cache" "$H/.local/share/pnpm" "$H/.bun" "$H/.cargo/registry" "$H/go/pkg"; do
+	[[ -d "$dir" ]] && args+=(--bind "$dir" "$dir")
+done
+
+# The daemon's own code stays read-only even though it lives under a writable root.
+args+=(--ro-bind "$ROOT" "$ROOT")
+
+# Hidden: credentials, the daemon's state, other agents' sockets.
+for secret in \
+	"$H/.ssh" "$H/.config/pi-durable" "$H/.config/gh" "$H/.local/share/pi-durable" \
+	"$H/.claude" "$H/.pi" "$H/.aws" "$H/.gnupg" "$H/.docker" "$H/.kube" "$H/.config/gcloud"; do
+	[[ -d "$secret" ]] && args+=(--tmpfs "$secret")
+done
+for secret in "$H/.claude.json" "$H/.npmrc" "$H/.netrc" "$H/.git-credentials" "$H/.pypirc"; do
+	[[ -f "$secret" ]] && args+=(--ro-bind /dev/null "$secret")
+done
+
+exec bwrap "${args[@]}" --chdir "$PWD" -- /bin/bash "$@"

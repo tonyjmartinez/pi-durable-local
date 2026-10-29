@@ -25,6 +25,8 @@ export type Policy = {
 	automerge: {
 		/** owner/repo entries that may be merged by `pr_merge`. Empty means auto-merge is off everywhere. */
 		repos: string[];
+		/** owner/repo → branch PRs target, for repos whose GitHub default branch is not the deploy branch. */
+		baseBranches: Record<string, string>;
 		/** Branches agents work on must start with this. */
 		branchPrefix: string;
 		maxChangedLines: number;
@@ -52,6 +54,7 @@ export const DEFAULT_POLICY: Policy = {
 	writableRoots: [join(home, "proj"), "/tmp"],
 	automerge: {
 		repos: [],
+		baseBranches: {},
 		branchPrefix: "pd/",
 		maxChangedLines: 600,
 		maxChangedFiles: 25,
@@ -64,7 +67,18 @@ export const DEFAULT_POLICY: Policy = {
 			"**/migrations/**",
 			"**/Dockerfile",
 			"**/*.tf",
+			"**/package.json",
 			"package-lock.json",
+			"**/Makefile",
+			"**/.husky/**",
+			"**/vitest.config.*",
+			"**/jest.config.*",
+			"**/playwright.config.*",
+			".gitlab-ci.yml",
+			".circleci/**",
+			"**/wrangler.toml",
+			"**/wrangler.json",
+			"**/wrangler.jsonc",
 			"pnpm-lock.yaml",
 			"yarn.lock",
 			"CODEOWNERS",
@@ -126,7 +140,14 @@ export function scrubbedEnv(): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
 	for (const [name, value] of Object.entries(process.env)) if (!SECRET_NAME.test(name)) env[name] = value;
 	env.PD_AGENT = "1";
+	env.PD_WRITABLE_ROOTS = loadPolicy().writableRoots.map((root) => root.replace(/^~(?=\/|$)/, home)).join(":");
 	env.GIT_TERMINAL_PROMPT = "0";
+	// Agents get no GitHub API credentials: gh in their shells sees an empty config. PRs are opened, inspected,
+	// and merged by the daemon's own gh through the pr_* tools. git push still works over the SSH key.
+	const agentGh = join(DATA_DIR, "agent-gh");
+	mkdirSync(agentGh, { recursive: true, mode: 0o700 });
+	env.GH_CONFIG_DIR = agentGh;
+	env.GH_PROMPT_DISABLED = "1";
 	return env;
 }
 

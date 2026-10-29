@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
@@ -19,10 +20,11 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
-import { Git_, Guard_, LoopTask, Loops_, Memory_, SessionContext, Sessions_, setHarness, Web_ } from "./extensions.ts";
+import { Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, Sessions_, setHarness, Web_ } from "./extensions.ts";
 import { audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
+const AGENT_SHELL = fileURLToPath(new URL("../bin/agent-shell", import.meta.url));
 const log = (...parts: unknown[]) => console.log(new Date().toISOString(), ...parts);
 
 ensureDirs();
@@ -55,7 +57,8 @@ const harness = await Harness.open(
 		models,
 		registry,
 		settings,
-		env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? process.env.HOME!, shellEnv }),
+		// Every agent command runs through bin/agent-shell: bash in a bubblewrap sandbox without credentials.
+		env: ({ cwd }) => new NodeExecutionEnv({ cwd: cwd ?? process.env.HOME!, shellEnv, shellPath: AGENT_SHELL }),
 		onReport: (error, info) => {
 			const task = "task" in info ? info.task?.kind : undefined;
 			log("report", info.type, task ?? "", String(error).slice(0, 300));
@@ -65,6 +68,15 @@ const harness = await Harness.open(
 	context,
 );
 setHarness(harness);
+// Sessions created before remotes were recorded get theirs once, from a plain read of the config file.
+await harness.commit(async (tx) => {
+	for (const info of Object.values((await tx.doc(Sessions)).byName)) {
+		if (info.remote === undefined) {
+			const remote = readOriginUrl(info.cwd);
+			if (remote !== undefined) info.remote = remote;
+		}
+	}
+}, context);
 harness.resume();
 harness.closed.then((end) => {
 	log("harness closed", end.reason, end.reason === "failed" ? String(end.error) : "");
@@ -100,12 +112,20 @@ async function createSession(body: { name?: string; cwd?: string; purpose?: stri
 	const existing = await harness.snapshot(Sessions, context);
 	if (existing?.byName[name] !== undefined) throw new HttpError(409, `session ${name} exists`);
 	const policy = loadPolicy();
+	// Recorded now, from a plain read of the config file, so later pushes never trust the agent-editable .git/config.
+	const remote = readOriginUrl(cwd);
 	const conversation = await harness.createConversation(
 		{ ownership: { kind: "ownerless" }, agent: { model: splitModel(body.model ?? policy.model), thinkingLevel: policy.thinkingLevel, cwd } },
 		context,
 	);
 	await harness.commit(async (tx) => {
-		(await tx.doc(Sessions)).byName[name] = { conversationId: conversation.id, cwd, purpose: body.purpose ?? "", createdAt: Date.now() };
+		(await tx.doc(Sessions)).byName[name] = {
+			conversationId: conversation.id,
+			cwd,
+			purpose: body.purpose ?? "",
+			createdAt: Date.now(),
+			...(remote === undefined ? {} : { remote }),
+		};
 	}, context);
 	log("session created", name, cwd);
 	return { name, cwd, conversationId: conversation.id };

@@ -9,6 +9,8 @@ export type SessionInfo = {
 	cwd: string;
 	purpose: string;
 	createdAt: number;
+	/** origin URL captured when the session was created; the daemon pushes only here. */
+	remote?: string;
 };
 
 export const Sessions = defineDoc<{ byName: Record<string, SessionInfo> }>({

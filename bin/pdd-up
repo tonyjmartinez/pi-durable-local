@@ -7,6 +7,7 @@ DATA="${PD_DATA_DIR:-$HOME/.local/share/pi-durable}"
 PIDFILE="$DATA/pdd.pid"
 LOG="$DATA/pdd.log"
 NODE="$(command -v node || echo "$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | tail -1)/bin/node")"
+umask 077
 mkdir -p "$DATA"
 
 if [[ "${1:-}" == "stop" ]]; then
