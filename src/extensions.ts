@@ -764,7 +764,8 @@ export async function tickPr(
 		usage = addUsage(usage, reviewUsage);
 		const now = JSON.parse(await gh(["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,title,body"], context)) as { headRefOid: string; title: string; body: string };
 		if (now.headRefOid !== sha || now.title !== facts.pr.title || (now.body ?? "") !== (facts.pr.body ?? "")) {
-			throw new Error("the PR changed while it was being reviewed; tick again");
+			// The review was paid for; carry its cost on the error so the caller still reports it.
+			throw Object.assign(new Error("the PR changed while it was being reviewed; tick again"), { usage });
 		}
 		await harnessLike.commit(async (tx) => {
 			(await tx.doc(Reviews)).byHead[facts.reviewKey] = { ...verdict, at: Date.now() };
@@ -960,7 +961,7 @@ export function reviewWith(models: Models, policy: Policy, context: Context) {
 		);
 		const verdict = parseVerdict(answer.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
 		// A reply with no verdict is a failed review, not a rejection: don't cache it, let the next tick retry.
-		if (verdict.unparseable) throw new Error(`review failed: ${verdict.reasons[0]}`);
+		if (verdict.unparseable) throw Object.assign(new Error(`review failed: ${verdict.reasons[0]}`), { usage: answer.usage });
 		return { approve: verdict.approve, reasons: verdict.reasons, usage: answer.usage };
 	};
 }
@@ -1172,7 +1173,9 @@ export const Git_ = defineExtension({
 					return usage === undefined ? result : { ...result, usage };
 				} catch (error) {
 					audit("tick_error", { session: session.name, repo, pr: args.number, error: String(error).slice(0, 500) });
-					return fail(`pr_tick failed: ${String((error as { stderr?: string }).stderr || error).slice(0, 500)}`);
+					const spent = (error as { usage?: Usage }).usage;
+					const failure = fail(`pr_tick failed: ${String((error as { stderr?: string }).stderr || error).slice(0, 500)}`);
+					return spent === undefined ? failure : { ...failure, usage: spent };
 				}
 			},
 		}),
