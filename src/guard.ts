@@ -86,8 +86,10 @@ function checkGitPush(command: string, policy: Policy): string | undefined {
 
 function touchesSecret(text: string): string | undefined {
 	const expanded = text.replaceAll("$HOME", home).replaceAll("${HOME}", home).replace(/(^|[\s"'=:])~(?=\/)/g, `$1${home}`);
-	for (const path of SECRET_PATHS) if (expanded.includes(path)) return path;
-	for (const fragment of SECRET_FRAGMENTS) if (fragment.pattern.test(expanded)) return fragment.reason;
+	// The daemon's read-only bare mirrors are the one sanctioned path under its data dir (see the git_sync tool).
+	const withoutMirrors = expanded.replace(new RegExp(`${home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.local/share/pi-durable/mirrors/[\\w.-]+\\.git(?=[\\s'"]|$)`, "g"), "<mirror>");
+	for (const path of SECRET_PATHS) if (withoutMirrors.includes(path)) return path;
+	for (const fragment of SECRET_FRAGMENTS) if (fragment.pattern.test(withoutMirrors)) return fragment.reason;
 	if (/\bgh\s+auth\s+token\b/.test(text)) return "gh auth token";
 	if (/(^|[\s/"'])\.env(?!\.(example|sample|template)(\s|$|["']))(\.[\w.-]+)?(\s|$|["'])/.test(text) && /\b(cat|less|more|head|tail|grep|awk|sed|cp|scp|curl|base64|xxd|strings)\b/.test(text)) {
 		return ".env file";

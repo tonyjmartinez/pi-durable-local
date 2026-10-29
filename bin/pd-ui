@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# pd-ui: local web interface for the pi-durable daemon (127.0.0.1 only).
+exec node --no-warnings "$(dirname "$(readlink -f "$0")")/../src/web.ts" "$@"

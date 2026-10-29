@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="pd-token" content="__TOKEN__">
+<meta name="color-scheme" content="light dark">
+<title>pi-durable</title>
+<style nonce="__NONCE__">
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --dim: #5d6672; --line: #dde1e6;
+  --accent: #2563eb; --accent-ink: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --code: #eef0f3;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216; --panel: #181c22; --ink: #e6e9ee; --dim: #97a1ad; --line: #2b323b;
+    --accent: #5b8def; --accent-ink: #0b1220; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --code: #20262e;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, sans-serif; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+nav { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
+nav button { background: none; border: 0; padding: 8px 12px; border-radius: 8px; color: var(--dim); font: inherit; cursor: pointer; }
+nav button[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); }
+#conn { font-size: 12px; color: var(--dim); }
+#conn.bad { color: var(--bad); }
+main { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; width: 100%; max-width: 920px; margin: 0 auto; }
+main.chat { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 8px; }
+.banner { background: var(--panel); border: 1px solid var(--bad); color: var(--bad); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.row.wrap { flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+.dim { color: var(--dim); font-size: 13px; }
+.mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+.trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); flex: none; }
+.dot.busy { background: var(--ok); animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.tag { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--dim); }
+.tag.active { color: var(--ok); border-color: var(--ok); }
+.tag.paused { color: var(--warn); border-color: var(--warn); }
+.tag.failed { color: var(--bad); border-color: var(--bad); }
+button.btn, input, textarea, select { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+button.btn { cursor: pointer; }
+button.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.btn.danger { color: var(--bad); border-color: var(--bad); }
+button.btn:disabled { opacity: .45; cursor: default; }
+button.link { background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; padding: 0; }
+form.grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+form.grid .full { grid-column: 1 / -1; }
+label { display: grid; gap: 3px; font-size: 12px; color: var(--dim); }
+details > summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+.session { cursor: pointer; }
+.session:hover { border-color: var(--accent); }
+#log { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 2px 10px; }
+.msg { margin: 10px 0; white-space: pre-wrap; word-break: break-word; }
+.msg .who { display: block; font-size: 12px; font-weight: 700; margin-bottom: 2px; }
+.msg.user .who { color: var(--accent); }
+.msg.pi .who { color: var(--ok); }
+.msg.peer .who { color: var(--warn); }
+.msg.loop { color: var(--warn); font-weight: 600; }
+.tool { margin: 3px 0; font: 13px/1.4 ui-monospace, Menlo, monospace; color: var(--dim); white-space: pre-wrap; word-break: break-word; }
+.tool.err, .note.err { color: var(--bad); }
+.note { margin: 8px 0; font-size: 13px; color: var(--dim); text-align: center; }
+.composer { border-top: 1px solid var(--line); padding-top: 8px; display: grid; gap: 8px; }
+.composer textarea { width: 100%; resize: vertical; min-height: 56px; max-height: 40vh; }
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+@media (max-width: 520px) { main { padding: 10px; } header { padding: 6px 10px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>pi-durable</h1>
+  <nav id="tabs" role="tablist"></nav>
+  <span id="conn">connecting…</span>
+</header>
+<main id="main"></main>
+<script nonce="__NONCE__">
+"use strict";
+const TOKEN = document.querySelector('meta[name="pd-token"]').content;
+const $ = (id) => document.getElementById(id);
+const main = $("main");
+
+// Build DOM without innerHTML: transcript text comes from models and tools, so it is never parsed as markup.
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : String(kid));
+  return el;
+}
+
+async function api(method, path, body, signal) {
+  const res = await fetch("/api" + path, {
+    method, signal, credentials: "same-origin",
+    headers: { "x-pd-token": TOKEN, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (path.endsWith("/events")) return res;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || res.status + " " + res.statusText);
+  return data;
+}
+
+const money = (n) => "$" + (n || 0).toFixed(n >= 1 ? 2 : 3);
+const ago = (t) => { if (!t) return "never"; const s = Math.round((Date.now() - t) / 1000); return s < 60 ? s + "s ago" : s < 3600 ? Math.round(s / 60) + "m ago" : s < 86400 ? Math.round(s / 3600) + "h ago" : Math.round(s / 86400) + "d ago"; };
+const until = (t) => { if (!t) return "-"; const s = Math.round((t - Date.now()) / 1000); return s <= 0 ? "due" : s < 3600 ? "in " + Math.ceil(s / 60) + "m" : "in " + Math.round(s / 3600) + "h"; };
+const textOf = (c) => typeof c === "string" ? c : Array.isArray(c) ? c.map((p) => p.type === "text" ? p.text : p.type === "image" ? "[image]" : "").join("") : "";
+function summarize(name, args) {
+  if (args == null) return "";
+  if (name === "bash") return String(args.command || "").split("\n")[0].slice(0, 200);
+  if (typeof args.path === "string") return args.path;
+  const s = JSON.stringify(args); return s.length > 200 ? s.slice(0, 197) + "…" : s;
+}
+
+let status = { sessions: [], loops: [], parked: [], keys: {} };
+let tab = "sessions";
+let current = null; // session name when a transcript is open
+let streamCtl = null;
+let pollTimer = null;
+
+const TABS = [["sessions", "Sessions"], ["loops", "Loops"], ["memory", "Memory"], ["audit", "Audit"]];
+function drawTabs() {
+  $("tabs").replaceChildren(...TABS.map(([id, label]) =>
+    h("button", { role: "tab", "aria-selected": String(tab === id && !current), onclick: () => go(id) }, label)));
+}
+function go(id) { stopStream(); current = null; tab = id; drawTabs(); render(); }
+
+function setConn(ok, text) { const c = $("conn"); c.textContent = text; c.className = ok ? "" : "bad"; }
+
+// Polling must not rebuild a form the user is typing into.
+const typing = () => main.contains(document.activeElement) && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+
+async function refresh() {
+  try {
+    status = await api("GET", "/status");
+    setConn(true, status.sessions.length + " sessions");
+    if (!current && !typing()) render();
+  } catch (e) { setConn(false, String(e.message)); }
+}
+
+function render() {
+  main.className = "";
+  if (current) return;
+  if (tab === "sessions") return renderSessions();
+  if (tab === "loops") return renderLoops();
+  if (tab === "memory") return renderMemory();
+  if (tab === "audit") return renderAudit();
+}
+
+// ---- sessions ----
+let newSessionOpen = false;
+function renderSessions() {
+  const kids = [];
+  if (status.keys && status.keys.anthropic === false) kids.push(h("div", { class: "banner" }, "ANTHROPIC_API_KEY is not set on the daemon; sessions will fail. Run pd doctor."));
+  if (status.parked && status.parked.length) kids.push(h("div", { class: "banner" }, "Parked tasks: " + status.parked.map((p) => p.kind + " (" + p.blocked + ")").join(", ")));
+  for (const s of status.sessions) {
+    kids.push(h("div", { class: "card session", onclick: () => openSession(s.name), tabindex: "0", onkeydown: (e) => { if (e.key === "Enter") openSession(s.name); } },
+      h("div", { class: "row" },
+        h("span", { class: "dot" + (s.busy ? " busy" : ""), title: s.busy ? "working" : "idle" }),
+        h("strong", { class: "grow trunc" }, s.name),
+        h("span", { class: "dim" }, money(s.cost))),
+      h("div", { class: "dim trunc" }, (s.model || "no model") + " · " + (s.cwd || "")),
+      s.purpose ? h("div", { class: "dim trunc" }, s.purpose) : null));
+  }
+  if (!status.sessions.length) kids.push(h("p", { class: "dim" }, "No sessions yet."));
+  const form = h("form", { class: "grid", onsubmit: async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await api("POST", "/sessions", { name: f.get("name"), cwd: f.get("cwd") || undefined, purpose: f.get("purpose") || undefined });
+      newSessionOpen = false; await refresh();
+    } catch (err) { alert(err.message); }
+  } },
+    h("label", {}, "Name", h("input", { name: "name", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9._-]{0,40}", autocapitalize: "off" })),
+    h("label", {}, "Working directory", h("input", { name: "cwd", placeholder: "~ (home) by default" })),
+    h("label", { class: "full" }, "Purpose (optional)", h("input", { name: "purpose" })),
+    h("button", { class: "btn primary", type: "submit" }, "Create session"));
+  kids.push(h("details", { class: "card", ...(newSessionOpen ? { open: true } : {}), ontoggle: (e) => { newSessionOpen = e.target.open; } }, h("summary", {}, "New session"), form));
+  main.replaceChildren(...kids);
+}
+
+function stopStream() { if (streamCtl) { streamCtl.abort(); streamCtl = null; } }
+
+function renderEntry(log, entry) {
+  const m = entry.model && entry.model[0];
+  const d = entry.data || {};
+  switch (entry.kind) {
+    case "pi.user": return log.append(h("div", { class: "msg user" }, h("span", { class: "who" }, "you"), textOf(m && m.content)));
+    case "pdl.peer": return log.append(h("div", { class: "msg peer" }, h("span", { class: "who" }, String(d.from)), String(d.text)));
+    case "pdl.loop-tick": return log.append(h("div", { class: "msg loop" }, "loop " + d.loopId + " · iteration " + (Number(d.iteration) + 1)));
+    case "pi.assistant": {
+      const texts = [], tools = [];
+      for (const b of (m && m.content) || []) {
+        if (b.type === "text" && b.text.trim()) texts.push(b.text.trim());
+        if (b.type === "toolCall") tools.push(h("div", { class: "tool" }, "⚙ " + b.name + " " + summarize(b.name, b.arguments)));
+      }
+      if (texts.length) log.append(h("div", { class: "msg pi" }, h("span", { class: "who" }, "pi"), texts.join("\n")));
+      return log.append(...tools);
+    }
+    case "pi.tool-result": if (m && m.isError) log.append(h("div", { class: "tool err" }, "✗ " + textOf(m.content).split("\n")[0].slice(0, 300))); return;
+    case "pi.compaction": return log.append(h("div", { class: "note" }, "── context compacted ──"));
+    case "pi.reset": return log.append(h("div", { class: "note" }, "── context reset ──"));
+  }
+}
+
+async function openSession(name) {
+  stopStream(); current = name; tab = "sessions"; drawTabs();
+  document.querySelectorAll("#tabs button").forEach((b) => b.setAttribute("aria-selected", "false"));
+  main.className = "chat";
+  const log = h("div", { id: "log" });
+  const state = h("span", { class: "dim" }, "connecting…");
+  const input = h("textarea", { placeholder: "Message pi…  (Ctrl/Cmd+Enter to send)", rows: "2" });
+  const sendBtn = h("button", { class: "btn primary", type: "button" }, "Send");
+  const steerBtn = h("button", { class: "btn", type: "button", disabled: true, title: "Interrupt the current run with this message" }, "Steer");
+  const abortBtn = h("button", { class: "btn danger", type: "button", disabled: true }, "Abort");
+  let running = false;
+  const setRunning = (v) => { running = v; steerBtn.disabled = !v; abortBtn.disabled = !v; state.textContent = v ? "working…" : "idle"; };
+  const send = async (mode) => {
+    const text = input.value.trim(); if (!text) return;
+    input.value = "";
+    try { await api("POST", "/sessions/" + encodeURIComponent(name) + "/send", { text, mode }); }
+    catch (e) { input.value = text; alert(e.message); }
+  };
+  sendBtn.onclick = () => send("followUp");
+  steerBtn.onclick = () => send("steer");
+  abortBtn.onclick = async () => { try { await api("POST", "/sessions/" + encodeURIComponent(name) + "/abort", {}); } catch (e) { alert(e.message); } };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(running ? "steer" : "followUp"); } });
+  main.replaceChildren(
+    h("div", { class: "row wrap" }, h("button", { class: "link", onclick: () => go("sessions") }, "← Sessions"), h("strong", { class: "grow trunc" }, name), state),
+    log,
+    h("div", { class: "composer" }, input, h("div", { class: "row wrap" }, sendBtn, steerBtn, abortBtn)));
+
+  const ctl = new AbortController(); streamCtl = ctl;
+  const stick = () => log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  let live = null; // the assistant bubble currently receiving text deltas
+  const onEvent = (ev) => {
+    const follow = stick();
+    switch (ev.type) {
+      case "snapshot":
+        log.replaceChildren(); live = null;
+        for (const entry of (ev.entries || []).slice(-60)) renderEntry(log, entry);
+        setRunning(ev.run !== undefined && ev.run !== null);
+        break;
+      case "run_start": setRunning(true); break;
+      case "run_end": setRunning(false); live = null; break;
+      case "message_update":
+        for (const c of ev.changes || []) if (c.type === "text_delta") {
+          if (!live) { live = h("div", { class: "msg pi" }, h("span", { class: "who" }, "pi"), ""); log.append(live); }
+          live.append(c.delta);
+        }
+        break;
+      case "message_end": live = null; break;
+      case "tool_execution_start": if (!ev.parentToolCallId) log.append(h("div", { class: "tool", "data-call": ev.toolCallId || "" }, "⚙ " + ev.toolName + " " + summarize(ev.toolName, ev.args))); break;
+      case "tool_execution_end":
+        if (!ev.parentToolCallId) {
+          const last = log.lastElementChild;
+          const err = ev.entry && ev.entry.model && ev.entry.model[0] && ev.entry.model[0].isError;
+          if (last && last.classList.contains("tool")) {
+            last.append(err ? " ✗" : " ✓");
+            if (err) { last.classList.add("err"); last.append(" " + textOf(ev.entry.model[0].content).split("\n")[0].slice(0, 200)); }
+          }
+        }
+        break;
+      case "entry_appended": if (ev.entry.kind !== "pi.assistant" && ev.entry.kind !== "pi.tool-result") renderEntry(log, ev.entry); break;
+      case "auto_retry_start": log.append(h("div", { class: "note" }, "[retry " + ev.attempt + ": " + ev.errorMessage + "]")); break;
+      case "task_failed": log.append(h("div", { class: "note err" }, "[" + ev.kind + " failed: " + ev.message + "]")); break;
+      case "submission": if (ev.record && ev.record.status === "unanswered") log.append(h("div", { class: "note err" }, "[unanswered: " + JSON.stringify(ev.record.reason || ev.record.detail || "") + "]")); break;
+    }
+    if (follow) log.scrollTop = log.scrollHeight;
+  };
+
+  let attempt = 0;
+  while (!ctl.signal.aborted) {
+    try {
+      const res = await api("GET", "/sessions/" + encodeURIComponent(name) + "/events", undefined, ctl.signal);
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || String(res.status)); }
+      attempt = 0;
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+          if (line) { try { onEvent(JSON.parse(line)); } catch (e) { console.error(e); } }
+        }
+      }
+    } catch (e) {
+      if (ctl.signal.aborted) return;
+      if (/no session named/.test(e.message)) { state.textContent = e.message; return; }
+    }
+    if (ctl.signal.aborted) return;
+    state.textContent = "reconnecting…";
+    await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt++, 8000)));
+  }
+}
+
+// ---- loops ----
+async function renderLoops() {
+  let loops = status.loops || [];
+  const act = async (id, what) => { try { await api("POST", "/loops/" + id + "/" + what, {}); await refresh(); } catch (e) { alert(e.message); } };
+  const cards = loops.slice().reverse().map((l) => h("div", { class: "card" },
+    h("div", { class: "row wrap" }, h("strong", {}, l.id), h("span", { class: "tag " + l.status }, l.status), h("span", { class: "dim grow trunc" }, l.session),
+      l.status === "active" ? h("button", { class: "btn", onclick: () => act(l.id, "pause") }, "Pause") : null,
+      l.status === "paused" ? h("button", { class: "btn", onclick: () => act(l.id, "resume") }, "Resume") : null,
+      l.status === "active" || l.status === "paused" ? h("button", { class: "btn danger", onclick: () => { if (confirm("Stop loop " + l.id + "?")) act(l.id, "stop"); } }, "Stop") : null),
+    h("div", {}, l.goal),
+    h("div", { class: "dim" }, "iteration " + l.iteration + "/" + l.maxIterations + " · every " + l.intervalMinutes + "m · budget " + money(l.budgetUsd) + " · last " + ago(l.lastRunAt) + (l.status === "active" ? " · next " + until(l.nextRunAt) : "")),
+    l.note ? h("div", { class: "dim" }, l.note) : null));
+  const options = status.sessions.map((s) => h("option", { value: s.name }, s.name));
+  const form = h("form", { class: "grid", onsubmit: async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const num = (k) => (f.get(k) ? Number(f.get(k)) : undefined);
+    try {
+      await api("POST", "/loops", { session: f.get("session"), goal: f.get("goal"), intervalMinutes: num("interval"), maxIterations: num("max"), budgetUsd: num("budget") });
+      e.target.reset(); await refresh();
+    } catch (err) { alert(err.message); }
+  } },
+    h("label", {}, "Session", h("select", { name: "session", required: true }, ...options)),
+    h("label", {}, "Every (minutes)", h("input", { name: "interval", type: "number", min: "1", placeholder: "default" })),
+    h("label", {}, "Max iterations", h("input", { name: "max", type: "number", min: "1", placeholder: "default" })),
+    h("label", {}, "Budget (USD)", h("input", { name: "budget", type: "number", min: "0.01", step: "0.01", placeholder: "default" })),
+    h("label", { class: "full" }, "Goal", h("textarea", { name: "goal", required: true, rows: "3" })),
+    h("button", { class: "btn primary", type: "submit", disabled: !status.sessions.length }, "Start loop"));
+  main.replaceChildren(...cards, loops.length ? null : h("p", { class: "dim" }, "No loops."), h("details", { class: "card" }, h("summary", {}, "New loop"), form));
+}
+
+// ---- memory ----
+let memoryFilter = "";
+async function renderMemory() {
+  main.replaceChildren(h("p", { class: "dim" }, "Loading…"));
+  try {
+    const items = (await api("GET", "/memory")).slice().sort((a, b) => b.updatedAt - a.updatedAt);
+    const list = h("div", {});
+    const draw = () => {
+      const q = memoryFilter.toLowerCase();
+      const shown = items.filter((m) => !q || [m.topic, m.text, m.project, ...(m.tags || [])].join(" ").toLowerCase().includes(q));
+      list.replaceChildren(...shown.map((m) => h("div", { class: "card" },
+        h("div", { class: "row wrap" }, h("strong", { class: "grow" }, m.topic), h("span", { class: "dim" }, "#" + m.id + " · " + (m.by || "") + " · " + ago(m.updatedAt))),
+        h("div", { class: "msg" }, m.text),
+        m.project || (m.tags && m.tags.length) ? h("div", { class: "dim mono" }, [m.project, ...(m.tags || []).map((t) => "#" + t)].filter(Boolean).join("  ")) : null)),
+        shown.length ? null : h("p", { class: "dim" }, items.length ? "No match." : "No memories yet."));
+    };
+    const search = h("input", { type: "search", placeholder: "Filter " + items.length + " memories", value: memoryFilter, oninput: (e) => { memoryFilter = e.target.value; draw(); } });
+    draw();
+    main.replaceChildren(h("div", { class: "card" }, search), list);
+  } catch (e) { main.replaceChildren(h("div", { class: "banner" }, e.message)); }
+}
+
+// ---- audit ----
+let auditKind = "";
+async function renderAudit() {
+  main.replaceChildren(h("p", { class: "dim" }, "Loading…"));
+  try {
+    const rows = (await api("GET", "/audit")).slice().reverse();
+    const kinds = [...new Set(rows.map((r) => r.event))].sort();
+    const body = h("div", {});
+    const draw = () => {
+      const shown = rows.filter((r) => !auditKind || r.event === auditKind);
+      body.replaceChildren(...shown.map((r) => {
+        const { at, event, ...rest } = r;
+        return h("div", { class: "card" },
+          h("div", { class: "row wrap" }, h("strong", {}, event), h("span", { class: "dim" }, new Date(at).toLocaleString())),
+          h("pre", { class: "mono" }, JSON.stringify(rest, null, 1).replace(/^\{\n?|\n?\}$/g, "")));
+      }), shown.length ? null : h("p", { class: "dim" }, "Nothing recorded."));
+    };
+    const select = h("select", { onchange: (e) => { auditKind = e.target.value; draw(); } }, h("option", { value: "" }, "All events"), ...kinds.map((k) => h("option", { value: k, ...(k === auditKind ? { selected: true } : {}) }, k)));
+    draw();
+    main.replaceChildren(h("div", { class: "card row" }, select, h("span", { class: "dim" }, "last " + rows.length)), body);
+  } catch (e) { main.replaceChildren(h("div", { class: "banner" }, e.message)); }
+}
+
+drawTabs();
+refresh();
+pollTimer = setInterval(() => { if (!current && (tab === "sessions" || tab === "loops") && !document.hidden) refresh(); }, 4000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !current) refresh(); });
+</script>
+</body>
+</html>

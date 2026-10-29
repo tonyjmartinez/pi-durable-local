@@ -43,7 +43,7 @@ const WORKFLOW = `You are one of several long-running pi-durable agent sessions 
 
 Your environment:
 - Your shell runs in a sandbox: your project directory, /tmp and package caches are writable; the rest of $HOME is read-only; you have no SSH keys and no GitHub token. That is deliberate. Never try to find or use credentials.
-- GitHub goes through tools: \`git_push\` pushes a work branch, \`pr_create\` pushes and opens a PR, \`pr_status\` / \`pr_list\` read PRs and CI, \`pr_merge\` requests a gated merge.
+- GitHub goes through tools: \`git_sync\` refreshes origin/* (you can't fetch from GitHub directly), \`git_push\` pushes a work branch, \`pr_create\` pushes and opens a PR, \`pr_status\` / \`pr_list\` read PRs and CI, \`pr_merge\` requests a gated merge.
 
 Working rules:
 - Work in your session's directory. Read the project's AGENTS.md/README before changing code.
@@ -469,18 +469,26 @@ async function pushWorkBranch(session: string, info: SessionInfo, branch: string
 	if (!branch.startsWith(policy.automerge.branchPrefix) || !WORK_BRANCH.test(branch) || branch.includes("..")) {
 		throw new Error(`branch must look like ${policy.automerge.branchPrefix}short-name (got "${branch}")`);
 	}
-	if (info.remote === undefined) throw new Error("this session has no origin remote recorded; recreate it from a cloned repo");
-	const mirror = join(DATA_DIR, "mirrors", `${session}.git`);
-	if (!existsSync(mirror)) {
-		mkdirSync(dirname(mirror), { recursive: true, mode: 0o700 });
-		await git(["init", "--bare", "--quiet", mirror], context);
-		await git(["-C", mirror, "remote", "add", "origin", info.remote], context);
-	}
+	const mirror = await ensureMirror(session, info, context);
 	await git(["-C", mirror, "fetch", "--no-tags", "--quiet", info.cwd, `+refs/heads/${branch}:refs/heads/${branch}`], context);
 	const sha = await git(["-C", mirror, "rev-parse", `refs/heads/${branch}`], context);
 	await git(["-C", mirror, "push", "--quiet", "origin", `${force ? "+" : ""}refs/heads/${branch}:refs/heads/${branch}`], context);
 	audit("pushed", { session, branch, sha, force });
 	return sha;
+}
+
+export const MIRRORS_DIR = join(DATA_DIR, "mirrors");
+
+/** The session's bare mirror, created on first use with the remote recorded at session creation. */
+async function ensureMirror(session: string, info: SessionInfo, context: Context): Promise<string> {
+	if (info.remote === undefined) throw new Error("this session has no origin remote recorded; recreate it from a cloned repo");
+	const mirror = join(MIRRORS_DIR, `${session}.git`);
+	if (!existsSync(mirror)) {
+		mkdirSync(MIRRORS_DIR, { recursive: true, mode: 0o700 });
+		await git(["init", "--bare", "--quiet", mirror], context);
+		await git(["-C", mirror, "remote", "add", "origin", info.remote], context);
+	}
+	return mirror;
 }
 
 async function sessionInfo(api: { snapshot: Harness["snapshot"] }, conversationId: number, context: Context) {
@@ -659,6 +667,26 @@ export const Git_ = defineExtension({
 	name: "pdl.git",
 	tools: [
 		defineTool({
+			name: "git_sync",
+			description:
+				"Refresh GitHub's branches for your repo (you can't fetch from GitHub yourself). The daemon updates its read-only mirror; then run the returned git fetch command in your shell to get origin/* up to date.",
+			parameters: Type.Object({}),
+			execute: async (_args, api, context) => {
+				const session = await sessionInfo(api, api.conversationId, context);
+				if (session === undefined) return fail("This conversation is not a named session.");
+				try {
+					const mirror = await ensureMirror(session.name, session.info, context);
+					await git(["-C", mirror, "fetch", "--prune", "--no-tags", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"], context);
+					const heads = await git(["-C", mirror, "for-each-ref", "--format=%(refname:short) %(objectname:short)", "refs/remotes/origin"], context);
+					return text(
+						`Mirror updated. Now run:\n  git fetch --prune ${mirror} '+refs/remotes/origin/*:refs/remotes/origin/*'\nThen branch from origin/<deploy-branch>.\n\nBranches on GitHub:\n${heads}`,
+					);
+				} catch (error) {
+					return fail(`Sync failed: ${String((error as { stderr?: string }).stderr || error).slice(0, 600)}`);
+				}
+			},
+		}),
+		defineTool({
 			name: "git_push",
 			description:
 				"Push a work branch of your session's repo to GitHub. You have no git credentials yourself; the daemon pushes for you. Commit first. Only branches with the work-branch prefix.",
@@ -798,7 +826,7 @@ Ongoing goal: ${loop.goal}
 Advance this goal by one meaningful, reviewable step, then stop. Each iteration:
 1. Orient: check memory, git status, open PRs (\`pr_list\`, \`pr_status\`), CI results, and notes from the last iteration.
 2. If a previous PR of yours is open: get it green and through \`pr_merge\`, or address the gate reasons. Prefer finishing over starting.
-3. Otherwise pick the next step. Early on that may be conceptual work (a PLAN.md, a spike); later, implementation on a fresh \`${policy.automerge.branchPrefix}…\` branch from the latest deploy branch (\`git fetch origin\` works read-only over HTTPS for public repos; otherwise build on what you have), with tests, verified, and opened with \`pr_create\`.
+3. Otherwise pick the next step. Early on that may be conceptual work (a PLAN.md, a spike); later, implementation on a fresh \`${policy.automerge.branchPrefix}…\` branch from the latest deploy branch (call \`git_sync\` first), with tests, verified, and opened with \`pr_create\`.
 4. Save what the next iteration needs to know with memory_save (project scope).
 5. Finish by calling loop_report with status "continue", "done" (goal fully achieved), or "blocked" (needs Tony), and a one-line note.`;
 }

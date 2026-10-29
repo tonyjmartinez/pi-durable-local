@@ -1,10 +1,12 @@
 // pdd: the one process that owns the pi-durable store. Every session, loop, and memory lives here; clients talk to it
 // over a Unix socket (HTTP + NDJSON event streams).
-import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
@@ -19,11 +21,12 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
-import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
+import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
 import { dryRunGates, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, Sessions_, setHarness, Web_ } from "./extensions.ts";
 import { audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
+const run = promisify(execFile);
 const AGENT_SHELL = fileURLToPath(new URL("../bin/agent-shell", import.meta.url));
 const log = (...parts: unknown[]) => console.log(new Date().toISOString(), ...parts);
 
@@ -151,6 +154,35 @@ async function status() {
 	return { sessions: rows, loops, parked, usage: await harness.usage(context), keys: { anthropic: Boolean(process.env.ANTHROPIC_API_KEY) } };
 }
 
+/**
+ * The factory's front door: clone a GitHub repo with the daemon's credentials (agents have none), register a session
+ * for it, and optionally start a loop on a goal.
+ */
+async function startProject(body: { repo?: string; name?: string; purpose?: string; goal?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number; baseBranch?: string }) {
+	const repo = String(body.repo ?? "");
+	if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new HttpError(400, "repo must be owner/name");
+	const name = String(body.name ?? repo.split("/")[1]!.replace(/\.[a-z]+$/i, "")).toLowerCase();
+	const root = loadPolicy().writableRoots[0]!.replace(/^~(?=\/|$)/, process.env.HOME!);
+	const dir = resolve(root, repo.split("/")[1]!);
+	if (!existsSync(dir)) {
+		// Hooks off and no global config: nothing in the cloned repo runs with the daemon's credentials.
+		await run("git", ["-c", "core.hooksPath=/dev/null", "clone", "--quiet", `git@github.com:${repo}.git`, dir], {
+			env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" },
+		});
+		audit("cloned", { repo, dir });
+	}
+	if (body.baseBranch) {
+		// Where PRs for this repo should land, for repos whose GitHub default isn't the deploy branch.
+		const policy = JSON.parse(readFileSync(POLICY_FILE, "utf8"));
+		policy.automerge = { ...policy.automerge, baseBranches: { ...policy.automerge?.baseBranches, [repo]: body.baseBranch } };
+		writeFileSync(POLICY_FILE, `${JSON.stringify(policy, null, "\t")}\n`);
+	}
+	const existing = (await harness.snapshot(Sessions, context))?.byName[name];
+	const session = existing === undefined ? await createSession({ name, cwd: dir, purpose: body.purpose ?? `${repo}` }) : { name, cwd: existing.cwd };
+	const loop = body.goal ? await startLoop({ session: name, goal: body.goal, intervalMinutes: body.intervalMinutes, maxIterations: body.maxIterations, budgetUsd: body.budgetUsd }) : undefined;
+	return { session, loop };
+}
+
 async function startLoop(body: { session?: string; goal?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number }) {
 	const policy = loadPolicy();
 	const { conversation } = await sessionByName(String(body.session ?? ""));
@@ -245,6 +277,7 @@ type Route = (match: RegExpExecArray, body: Record<string, unknown>, request: In
 const routes: [string, RegExp, Route][] = [
 	["GET", /^\/status$/, () => status()],
 	["POST", /^\/sessions$/, (_m, body) => createSession(body)],
+	["POST", /^\/projects$/, (_m, body) => startProject(body)],
 	["DELETE", /^\/sessions\/([^/]+)$/, async (m) => {
 		const { conversation } = await sessionByName(m[1]!);
 		await conversation.abort(context, { background: true });

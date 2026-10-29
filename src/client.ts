@@ -276,6 +276,8 @@ function tmux(names: string[]): void {
 
 const HELP = `pd — pi-durable sessions that keep running
 
+  pd factory <owner/repo> ["goal"] [--base main] [--every 60] [--max 20] [--budget 5] [--name n]
+                                            clone, create a session, and (with a goal) start a loop
   pd status                                 sessions, loops, spend
   pd new <name> --cwd <dir> [--purpose "…"] [--model provider/id]
   pd attach <name>                          live view + chat (Ctrl-C detaches; agent keeps going)
@@ -318,6 +320,22 @@ async function main(argv: string[]): Promise<void> {
 				model: typeof opts.model === "string" ? opts.model : undefined,
 			});
 			console.log(`created ${c.bold(created.name)} in ${created.cwd}. Attach: pd attach ${created.name}`);
+			return;
+		}
+		case "factory": {
+			const result = await call("POST", "/projects", {
+				repo: positional[0],
+				goal: positional.slice(1).join(" ") || undefined,
+				name: typeof opts.name === "string" ? opts.name : undefined,
+				purpose: typeof opts.purpose === "string" ? opts.purpose : undefined,
+				baseBranch: typeof opts.base === "string" ? opts.base : undefined,
+				intervalMinutes: opts.every ? Number(opts.every) : undefined,
+				maxIterations: opts.max ? Number(opts.max) : undefined,
+				budgetUsd: opts.budget ? Number(opts.budget) : undefined,
+			});
+			console.log(`session ${c.bold(result.session.name)} in ${result.session.cwd}`);
+			if (result.loop) printLoop(result.loop);
+			else console.log(c.dim(`no goal given; start one with: pd loop start ${result.session.name} "goal"`));
 			return;
 		}
 		case "attach":

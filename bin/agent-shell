@@ -41,7 +41,7 @@ done
 # The daemon's own code stays read-only even though it lives under a writable root.
 args+=(--ro-bind "$ROOT" "$ROOT")
 
-# Hidden: credentials, the daemon's state, other agents' sockets.
+# Hidden: credentials, the daemon's state, other agents' sockets. (Mirrors are re-exposed read-only below.)
 for secret in \
 	"$H/.ssh" "$H/.config/pi-durable" "$H/.config/gh" "$H/.local/share/pi-durable" \
 	"$H/.claude" "$H/.pi" "$H/.aws" "$H/.gnupg" "$H/.docker" "$H/.kube" "$H/.config/gcloud"; do
@@ -50,5 +50,9 @@ done
 for secret in "$H/.claude.json" "$H/.npmrc" "$H/.netrc" "$H/.git-credentials" "$H/.pypirc"; do
 	[[ -f "$secret" ]] && args+=(--ro-bind /dev/null "$secret")
 done
+
+# The daemon's bare mirrors, read-only, so agents can fetch origin/* (refreshed by the git_sync tool) without credentials.
+MIRRORS="$H/.local/share/pi-durable/mirrors"
+[[ -d "$MIRRORS" ]] && args+=(--ro-bind "$MIRRORS" "$MIRRORS")
 
 exec bwrap "${args[@]}" --chdir "$PWD" -- /bin/bash "$@"
