@@ -121,7 +121,7 @@ Agents never hold GitHub credentials. They commit locally and call tools that th
 
 1. Merged: `done` (or `stop` if closed unmerged).
 2. Draft: `mark-ready`. Conflicts: `resolve-conflicts`. Behind its base: `update-branch`.
-3. A failing or cancelled check: `fix-ci`. A pending check: `wait-ci`.
+3. A failing or cancelled check: `fix-ci`, unless every failing check comes from outside GitHub Actions (see CI below), in which case `park-human`. A pending check: `wait-ci`.
 4. No passing check at all (with `requireChecks`): `park-human`.
 5. A reviewer requested changes, there are unresolved review threads (read by the daemon through a read-only GraphQL query), or the independent review rejected this head: `address-review`. If the threads cannot be read, or there are more than 100, the PR parks for a human instead of being treated as having none.
 6. Unless a human approved this head: a one-way door, any reason in the PR's "needs a human" list, or a high risk tier: `park-human`.
@@ -135,7 +135,7 @@ The reasons that always park a PR for a human are: it comes from a fork; its aut
 
 **Risk tiers.** The diff earns a floor: high for a protected path or more than 400 changed lines; medium for more than 100 lines, a test changed alongside the code it tests, or a config file changed; otherwise low. The agent's declared Risk can only raise it. Low and medium PRs may auto-merge; high always waits for you. Every PR gets the independent review, including one that parks for a human: if it would park and CI has at least one passing check, the daemon reviews it first, so you see the verdict with the park.
 
-**CI.** Only GitHub Actions check runs on the exact head commit count as a pass. Commit statuses and check runs from other apps can block a PR but never pass it, because anyone with a token can post one. All pages of check runs are read, not just the first 100. For 90 seconds after the daemon pushes a commit, the tick adds a synthetic pending check, because right after a push only the fastest workflow may have registered and its green must not be mistaken for all of CI.
+**CI.** Only GitHub Actions check runs on the exact head commit count as a pass. Commit statuses and check runs from other apps can block a PR but never pass it, because anyone with a token can post one. Each check name carries its source (`name [app-slug]` for another app's check run, `context [commit status]` for a status). If the only failing checks are from outside GitHub Actions, such as a Cloudflare build that fails on every branch, the agent is not asked to fix them: the PR parks for you with those check names listed. It stays blocked and is never ignored. A failing Actions check next to an external one is still the agent's to fix. All pages of check runs are read, not just the first 100. For 90 seconds after the daemon pushes a commit, the tick adds a synthetic pending check, because right after a push only the fastest workflow may have registered and its green must not be mistaken for all of CI.
 
 **The independent review.** A separate Opus call (`reviewModel`) reads the title, description and diff and replies with a JSON verdict. It is told to treat all three as untrusted data written by the agent under review. The PR text is placed inside a random per-call delimiter the PR cannot forge. The diff is fetched for the exact head commit being keyed (a compare against the base), and if the head, title or description changes while the review runs, the tick fails and reviews again, so a verdict can never be stored for a commit it did not read. A diff over 200,000 characters is rejected as too large to review, never truncated. Conflicting verdicts are a rejection. A reply with no verdict at all is a failed review: the tick errors, nothing is cached, and the next tick retries. The verdict is cached per exact head commit plus a hash of the title and description, so it runs once per state of the PR and runs again after any push or `pr_edit`.
 
@@ -274,7 +274,7 @@ Default `protectedPaths`: CI config (`.github`, GitLab, CircleCI), env and key f
 - `read`, `write`, and `edit` run inside the daemon, not the sandbox; they are covered by the guard's path checks only. `web_fetch` also runs there, with the network checks above.
 - The sandbox is Linux-only (bubblewrap). On macOS there is no equivalent yet.
 - The review model can be wrong. Merging low and medium risk changes after one model's approval is a deliberate trade for speed; the protected-path list, size limits, CI requirement and risk tiers exist to keep the changes that reach that point small and boring.
-- Commit statuses and checks from other apps never count as passing CI, so a repo whose only CI is an external app will park every PR.
+- Commit statuses and checks from other apps never count as passing CI, so a repo whose only CI is an external app will park every PR. A failing external check also parks the PR, and there is no way to tell the factory to ignore a known-bad one: you have to fix that check or merge by hand.
 
 ### Residual risks
 

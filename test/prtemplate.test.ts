@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DEFAULT_POLICY } from "../src/config.ts";
-import { effectiveRisk, maxTier, parsePrBody, PR_TEMPLATE, riskFloor } from "../src/prtemplate.ts";
+import { effectiveRisk, formatHints, maxTier, parsePrBody, PR_TEMPLATE, riskFloor } from "../src/prtemplate.ts";
 
 const protectedPaths = DEFAULT_POLICY.automerge.protectedPaths;
 const files = (...names: string[]) => names.map((filename) => ({ filename }));
@@ -230,5 +230,130 @@ describe("effectiveRisk", () => {
 	it("maxTier picks the highest", () => {
 		assert.equal(maxTier("low", "medium", "low"), "medium");
 		assert.equal(maxTier(), "low");
+	});
+});
+
+describe("hints", () => {
+	const body = (recap: string, door = "Door: two-way", testing = "Ran `npm test`: 10 passing.") =>
+		`## Intent\n\nFix it.\n\n${door}\n\n## Why\n\nBecause.\n\n## Testing\n\n${testing}\n\n## System recap\n\n${recap}\n`;
+	const hintsOf = (text: string) => parsePrBody(text).hints;
+
+	it("are empty when every field is filled in", () => {
+		const parsed = parsePrBody(FILLED);
+		assert.deepEqual(parsed.hints, {});
+		assert.equal(formatHints(parsed), "");
+	});
+
+	it("cover every missing field of the unfilled template, each with an example", () => {
+		const parsed = parsePrBody(PR_TEMPLATE);
+		assert.deepEqual(Object.keys(parsed.hints).sort(), [...parsed.missing].sort());
+		for (const [field, hint] of Object.entries(parsed.hints)) {
+			assert.ok(hint.includes("`"), `${field} hint has a quoted example: ${hint}`);
+		}
+		assert.match(parsed.hints.touches!, /Touches: <area> \(composes\|extends\|adds\)/);
+		assert.match(parsed.hints.risk!, /Risk: low/);
+		assert.match(parsed.hints.door!, /Door: two-way/);
+	});
+
+	it("never quote the template's placeholders back", () => {
+		const hints = Object.values(parsePrBody(PR_TEMPLATE).hints).join("\n");
+		assert.ok(!hints.includes("()"), hints);
+		assert.ok(!/not "/.test(hints), "a placeholder is not a wrong value");
+	});
+
+	it("tell the agent how to fix a Touches line that has no kind, using its own area", () => {
+		const hint = hintsOf(body("- Risk: low. Content text only.\n- Touches: `src/content/plants/ponytail-palm.md` (the fun-fact line only). Rendered on `/plants/ponytail-palm/`.")).touches!;
+		assert.match(hint, /needs a kind in parentheses/);
+		assert.match(hint, /Touches: src\/content\/plants\/ponytail-palm\.md \(composes\)/);
+		assert.ok(!hint.includes("``"), "no nested backticks in the example");
+	});
+
+	it("name the kinds when the kind is wrong, and say which word was used", () => {
+		const hint = hintsOf(body("Risk: low\nTouches: parser (modifies)")).touches!;
+		assert.match(hint, /composes, extends or adds, not "\(modifies\)"/);
+		assert.match(hint, /Touches: parser \(composes\)/);
+	});
+
+	it("keep an area that has commentary or a dash short and clean", () => {
+		assert.match(hintsOf(body("Risk: low\nTouches: guard - the audit hook (modifies)")).touches!, /Touches: guard \(composes\)/);
+		assert.match(hintsOf(body("Risk: low\nTouches: the build system; also CI")).touches!, /Touches: the build system \(composes\)/);
+		const long = hintsOf(body(`Risk: low\nTouches: ${"x".repeat(200)}`)).touches!;
+		assert.ok(long.length < 260, String(long.length));
+	});
+
+	it("ask for a Touches line when there is none, or the label is empty", () => {
+		for (const recap of ["Risk: low", "Risk: low\nTouches:", "Risk: low\nTouches: ()"]) {
+			assert.match(hintsOf(body(recap)).touches!, /Add `Touches: <area> \(composes\|extends\|adds\)`/, recap);
+		}
+	});
+
+	it("explain a Risk that is missing or not one of the three values", () => {
+		assert.match(hintsOf(body("Touches: a (adds)")).risk!, /Add `Risk: low`/);
+		assert.match(hintsOf(body("Risk: minimal\nTouches: a (adds)")).risk!, /Risk must be low, medium or high, not "minimal"/);
+		assert.match(hintsOf(body("**Risk:** unsure\n**Touches:** a (adds)")).risk!, /not "unsure"/);
+		assert.equal(hintsOf(body("Risk: Medium\nTouches: a (adds)")).risk, undefined);
+	});
+
+	it("explain a Door that is missing, names both values, or names neither", () => {
+		const recap = "Risk: low\nTouches: a (adds)";
+		assert.match(hintsOf(body(recap, "")).door!, /Add a line `Door: two-way`/);
+		assert.match(hintsOf(body(recap, "Door: two-way or one-way")).door!, /names both values/);
+		assert.match(hintsOf(body(recap, "Door: maybe")).door!, /not "maybe"/);
+		assert.equal(hintsOf(body(recap, "Door: one way")).door, undefined);
+	});
+
+	it("ask Testing to list commands, both when it is missing and when it says nothing ran", () => {
+		const recap = "Risk: low\nTouches: a (adds)";
+		const missing = parsePrBody(body(recap, "Door: two-way", ""));
+		assert.ok(missing.missing.includes("testing"));
+		assert.match(missing.hints.testing!, /listing the commands you ran and their results, e\.g\. `npm test: 125 passing`/);
+		const nothing = parsePrBody(body(recap, "Door: two-way", "none"));
+		assert.ok(!nothing.missing.includes("testing"), "present, so not missing");
+		assert.match(nothing.hints.testing!, /Testing says nothing was run/);
+		assert.equal(nothing.testing?.ranNothing, true);
+	});
+
+	it("ask for Intent and Why by name", () => {
+		const hints = hintsOf("Door: two-way\nRisk: low\nTouches: a (adds)\n## Testing\nnpm test ok");
+		assert.match(hints.intent!, /`## Intent`/);
+		assert.match(hints.why!, /`## Why`/);
+	});
+
+	it("are one line each, short, and only for fields that need fixing", () => {
+		const bodies = [PR_TEMPLATE, "", "garbage", body("Touches: x"), body("Risk: ?\nTouches: a (b)", "Door: ?", "n/a"), FILLED];
+		for (const text of bodies) {
+			const parsed = parsePrBody(text);
+			const allowed = new Set([...parsed.missing, ...(parsed.testing?.ranNothing ? ["testing"] : [])]);
+			for (const [field, hint] of Object.entries(parsed.hints)) {
+				assert.ok(allowed.has(field), `${field} has a hint but is fine`);
+				assert.ok(!hint.includes("\n") && hint.length <= 260, `${field}: ${hint}`);
+			}
+			for (const field of parsed.missing) assert.ok(parsed.hints[field] !== undefined, `${field} is missing without a hint`);
+		}
+	});
+
+	it("never throw, whatever the body", () => {
+		for (const text of ["", "\n\n", "```", "<", "<!--", "Touches:", "Risk:", "Door:", "###", "**", "\u0000", "Touches: (", "Touches: )(", "Risk: \n\nTouches:\n(x)"]) {
+			assert.doesNotThrow(() => formatHints(parsePrBody(text)), JSON.stringify(text));
+		}
+	});
+});
+
+describe("formatHints", () => {
+	it("prints one `- field: hint` line per hint, in field order", () => {
+		const text = formatHints(parsePrBody(PR_TEMPLATE));
+		const lines = text.split("\n");
+		assert.equal(lines.length, 6);
+		assert.deepEqual(lines.map((line) => /^- (\w+):/.exec(line)?.[1]), ["intent", "door", "why", "testing", "risk", "touches"]);
+	});
+
+	it("prints only the field that needs fixing", () => {
+		const text = formatHints(parsePrBody(FILLED.replace("Touches: pr_merge (composes)", "Touches: pr_merge")));
+		assert.equal(text.split("\n").length, 1);
+		assert.match(text, /^- touches: Touches needs a kind in parentheses/);
+	});
+
+	it("is empty when there are no hints", () => {
+		assert.equal(formatHints({ hints: {} }), "");
 	});
 });

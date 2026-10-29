@@ -429,7 +429,7 @@ describe("describeTick", () => {
 		script({ runs: [JSON.stringify({ name: "e2e", status: "queued", conclusion: null, app: { slug: "github-actions" } })] });
 		const text = ext.describeTick(await tick(fakeModels([APPROVE])));
 		assert.match(text, /^Next action: wait-ci/);
-		assert.match(text, /Wait about 60s/);
+		assert.match(text, /call pr_tick again with wait: true/);
 		assert.match(text, /review not run/);
 	});
 

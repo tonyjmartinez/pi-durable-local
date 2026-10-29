@@ -17,6 +17,11 @@ export type ParsedPr = {
 	touches?: { area: string; kind: TouchKind }[];
 	/** Required fields that are absent or still the template's placeholder: intent, door, why, testing, risk, touches. */
 	missing: string[];
+	/**
+	 * One line per field that needs fixing, keyed by field name, each with an example. Every `missing` field has one,
+	 * and so does a Testing section that says nothing was run (present, so not in `missing`). Empty when all is well.
+	 */
+	hints: Record<string, string>;
 };
 
 export const PR_TEMPLATE = `## Intent
@@ -141,7 +146,7 @@ export function parsePrBody(body: string): ParsedPr {
 	const riskSource = parseRisk(recap) !== undefined ? recap : text;
 	const touchSource = parseTouches(recap).length > 0 ? recap : text;
 
-	const parsed: ParsedPr = { missing: [] };
+	const parsed: ParsedPr = { missing: [], hints: {} };
 	if (intentText !== "") parsed.intent = intentText;
 	const door = parseDoor(firstLine(get("door")));
 	if (door !== undefined) parsed.door = door;
@@ -165,7 +170,67 @@ export function parsePrBody(body: string): ParsedPr {
 	] as const) {
 		if (present === undefined) parsed.missing.push(field);
 	}
+
+	const clean = stripPlaceholders(text);
+	const hints = parsed.hints;
+	if (parsed.intent === undefined) hints.intent = "Add a `## Intent` section: one or two sentences on what this PR does.";
+	if (parsed.why === undefined) hints.why = "Add a `## Why` section: why now, and what it unblocks.";
+	if (parsed.door === undefined) hints.door = doorHint(stripPlaceholders(firstLine(get("door"))));
+	if (parsed.testing === undefined) {
+		hints.testing = "Add a `## Testing` section listing the commands you ran and their results, e.g. `npm test: 125 passing`, and what you could not verify.";
+	} else if (parsed.testing.ranNothing) {
+		hints.testing = "Testing says nothing was run. List the commands you actually ran and their results, e.g. `npm test: 125 passing`.";
+	}
+	if (parsed.risk === undefined) hints.risk = riskHint(labelValue(clean, "risk"));
+	if (parsed.touches === undefined) hints.touches = touchesHint(labelValue(clean, "touches"));
 	return parsed;
+}
+
+/** What follows `Label:` on its line, or undefined when the label is absent. */
+function labelValue(text: string, label: string): string | undefined {
+	// Same line only: a label with nothing after it must not pick up the next line.
+	const match = new RegExp(`\\b${label}\\b\\**[ \\t]*:[ \\t]*\\**[ \\t]*([^\\n]*)`, "i").exec(text);
+	// Template placeholders leave empty parentheses behind; they say nothing.
+	return match === null ? undefined : match[1]!.replace(/\(\s*\)/g, "").replace(/[*_`]+$/g, "").replace(/\s+/g, " ").trim();
+}
+
+const excerpt = (value: string, max = 50) => (value.length > max ? `${value.slice(0, max - 1).trimEnd()}…` : value);
+
+/** The area as the agent wrote it, without its commentary, backticks or the rest of the sentence. */
+function areaOf(given: string): string {
+	const plain = given.replace(/[`*_]/g, "");
+	const cut = (plain.split(/\s*\(|\.\s|\s[-\u2013\u2014]\s|;/)[0] ?? plain).trim().replace(/[.,]+$/, "");
+	return excerpt(cut === "" ? plain.trim() : cut, 40);
+}
+
+function doorHint(given: string): string {
+	if (given === "") return "Add a line `Door: two-way` (easy to revert) or `Door: one-way` (data, contracts, security, money, public API, release).";
+	const lower = given.toLowerCase();
+	if (/\bone[- ]?way\b/.test(lower) && /\b(?:two|2)[- ]?way\b/.test(lower)) return "Door names both values; write exactly one, e.g. `Door: two-way`.";
+	return `Door must say two-way or one-way, not "${excerpt(given, 40)}". Example: \`Door: two-way\`.`;
+}
+
+function riskHint(given: string | undefined): string {
+	if (given === undefined || given === "") {
+		return "Add `Risk: low` (or medium or high) under `## System recap`: low uses existing pieces, medium changes one, high adds a new piece or trust boundary.";
+	}
+	return `Risk must be low, medium or high, not "${excerpt(given, 30)}". Example: \`Risk: low\`.`;
+}
+
+function touchesHint(given: string | undefined): string {
+	if (given === undefined || given === "") {
+		return "Add `Touches: <area> (composes|extends|adds)` under `## System recap`, e.g. `Touches: parser (composes)`.";
+	}
+	const area = areaOf(given);
+	const kind = /\(\s*([A-Za-z-]+)\s*\)\s*[.;]?\s*$/.exec(given)?.[1];
+	if (kind !== undefined) return `Touches kind must be composes, extends or adds, not "(${kind})". Example: \`Touches: ${area} (composes)\`.`;
+	return `Touches needs a kind in parentheses after the area: composes (uses existing pieces), extends (changes one) or adds (a new piece). Example: \`Touches: ${area} (composes)\`.`;
+}
+
+/** The hints as lines for an error message, in field order: `- touches: ...`. Empty when there are none. */
+export function formatHints(parsed: Pick<ParsedPr, "hints">): string {
+	const order = ["intent", "door", "why", "testing", "risk", "touches"];
+	return order.filter((field) => parsed.hints[field] !== undefined).map((field) => `- ${field}: ${parsed.hints[field]}`).join("\n");
 }
 
 export type RiskFile = { filename: string; previous_filename?: string };
