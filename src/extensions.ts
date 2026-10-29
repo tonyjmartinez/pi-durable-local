@@ -20,7 +20,8 @@ import {
 	ToolTask,
 	UsageDoc,
 } from "@earendil-works/pi-durable";
-import { DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
+import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
+import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, type FrictionInput, frictionFromAudit } from "./friction.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
 import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
 import { effectiveRisk, type ParsedPr, parsePrBody, PR_TEMPLATE, type RiskFile, riskFloor, type Tier } from "./prtemplate.ts";
@@ -60,6 +61,7 @@ Working rules:
 - Record durable facts (decisions, conventions, gotchas, preferences Tony states) with \`memory_save\`; check \`memory_search\` before re-deriving something.
 - Delegate to save cost with the \`subagent\` tool (same sandbox, cannot ship): tier fast (default) for research, scoped implementation, tests and diagnosing checks; tier plan for product decisions and planning what to build next; tier deep only for a big swing or a design decision, with a stated reason. Keep judgment and shipping yourself, and check each report before acting on it.
 - Coordinate with other sessions via \`sessions_list\` / \`session_send\` instead of editing the same repo at once.
+- When something costs you real time (a confusing tool, missing script, flaky check, a rule blocking legitimate work), file it with \`friction_file\` before finishing: scope project for the repo, scope factory for this factory's own tools and rules.
 - If blocked on a decision that is Tony's to make, say so plainly and stop rather than guessing.`;
 
 function projectInstructions(cwd: string): string | undefined {
@@ -695,6 +697,43 @@ async function prSummary(repo: string, number: number, context: Context): Promis
 	return `#${pr.number} ${pr.title} [${pr.state}${pr.isDraft ? ", draft" : ""}] ${pr.headRefName} → ${pr.baseRefName}\n${pr.url}\n+${pr.additions} −${pr.deletions} in ${pr.changedFiles} files, mergeable=${pr.mergeable}, review=${pr.reviewDecision || "none"}\nChecks on ${pr.headRefOid.slice(0, 7)}:\n${checks}`;
 }
 
+export const FACTORY_REPO = "tonyjmartinez/pi-durable-local";
+
+/** File one friction issue, or comment on the open one it duplicates. Labels are created on first use. */
+export async function fileFriction(repo: string, input: FrictionInput, context: Context): Promise<{ url?: string; duplicateOf?: number }> {
+	const issue = buildFrictionIssue(input);
+	const open = JSON.parse(await gh(["issue", "list", "--repo", repo, "--label", FRICTION_LABEL, "--state", "open", "--limit", "200", "--json", "number,title,body"], context).catch(() => "[]")) as {
+		number: number; title: string; body: string;
+	}[];
+	const duplicate = findDuplicate(issue, open);
+	if (duplicate !== undefined) {
+		await gh(["issue", "comment", String(duplicate), "--repo", repo, "--body", `Hit again:\n\n${issue.body}`], context);
+		return { duplicateOf: duplicate };
+	}
+	for (const label of issue.labels) {
+		await gh(["label", "create", label, "--repo", repo, "--force", "--color", label === FRICTION_LABEL ? "d93f0b" : label === "needs-decision" ? "5319e7" : "fbca04"], context).catch(() => undefined);
+	}
+	const url = (await gh(["issue", "create", "--repo", repo, "--title", issue.title, "--body", issue.body, ...issue.labels.flatMap((l) => ["--label", l])], context)).trim();
+	return { url };
+}
+
+/** Repeated guard blocks are friction about the factory's own rules: file them on this repo for a human to decide. */
+export async function sweepAuditFriction(context: Context): Promise<number> {
+	let entries: AuditEntry[] = [];
+	try {
+		entries = readFileSync(AUDIT_LOG, "utf8").trim().split("\n").slice(-5000).map((line) => JSON.parse(line) as AuditEntry);
+	} catch {
+		return 0;
+	}
+	let filed = 0;
+	for (const candidate of frictionFromAudit(entries)) {
+		const result = await fileFriction(FACTORY_REPO, candidate, context);
+		audit("friction", { repo: FACTORY_REPO, source: "audit-sweep", key: candidate.key, ...result });
+		if (result.url) filed++;
+	}
+	return filed;
+}
+
 /** The independent reviewer: a separate model call that sees only the PR, framed as untrusted data. */
 export function reviewWith(models: Models, policy: Policy, context: Context) {
 	return async (pr: PrView, diff: string): Promise<{ approve: boolean; reasons: string[] }> => {
@@ -834,6 +873,36 @@ export const Git_ = defineExtension({
 			},
 		}),
 		defineTool({
+			name: "friction_file",
+			description:
+				"File a friction issue: a durable papercut that slowed you down (a confusing tool, a missing script, a flaky check, a rule that blocked legitimate work). Searches open friction issues first and comments on a match instead of duplicating. scope project files it in your repo; scope factory files it on the pi-durable-local repo (for problems with the factory's own tools and rules). Do this at the end of an iteration when something cost you real time.",
+			parameters: Type.Object({
+				scope: Type.Union([Type.Literal("project"), Type.Literal("factory")]),
+				title: Type.String(),
+				whatHappened: Type.String(),
+				whatYouWanted: Type.String(),
+				howToReproduce: Type.String(),
+				cost: Type.String({ description: "Time, money or iterations lost" }),
+				alreadyLooked: Type.Optional(Type.String()),
+				relevantFiles: Type.Optional(Type.Array(Type.String())),
+				priority: Type.Union([Type.Literal("P0"), Type.Literal("P1"), Type.Literal("P2"), Type.Literal("P3")]),
+				needsDecision: Type.Optional(Type.Boolean({ description: "True if a human must decide (product call, rule change)" })),
+			}),
+			execute: async (args, api, context) => {
+				const session = await sessionInfo(api, api.conversationId, context);
+				const repo = args.scope === "factory" ? FACTORY_REPO : githubRepoOf(session?.info.remote);
+				if (repo === undefined) return fail("This session has no GitHub repo.");
+				const { scope: _scope, ...input } = args;
+				try {
+					const result = await fileFriction(repo, input, context);
+					audit("friction", { session: session?.name, repo, ...result, title: args.title });
+					return text(result.duplicateOf ? `Commented on existing friction ${repo}#${result.duplicateOf}.` : `Filed ${result.url}`);
+				} catch (error) {
+					return fail(`Could not file friction: ${String((error as { stderr?: string }).stderr || error).slice(0, 400)}`);
+				}
+			},
+		}),
+		defineTool({
 			name: "pr_status",
 			description: "Show a PR's state, size, mergeability and CI results for its head commit. Pass the PR number or your branch.",
 			parameters: Type.Object({ number: Type.Optional(Type.Number()), branch: Type.Optional(Type.String()) }),
@@ -967,7 +1036,10 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 			if (loop === undefined || loop.status !== "active") return stop("done", loop?.note ?? "");
 			if (session === undefined) return stop("failed", `session ${loop.session} no longer exists`);
 			const spent = (await sessionCost(runtime, loop.session, session.conversationId, context)) - loop.costAtStart;
-			if (spent >= loop.budgetUsd) return stop("paused", `budget reached: $${spent.toFixed(2)} of $${loop.budgetUsd}`);
+			if (spent >= loop.budgetUsd) {
+				audit("loop_budget", { loop: loop.id, session: loop.session, note: `$${spent.toFixed(2)} of $${loop.budgetUsd}; resume with pd loop resume ${loop.id}` });
+				return stop("paused", `budget reached: $${spent.toFixed(2)} of $${loop.budgetUsd}`);
+			}
 			if (loop.iteration >= loop.maxIterations) return stop("done", `reached ${loop.maxIterations} iterations`);
 
 			const conversation = await harness().conversation(session.conversationId as never, context);

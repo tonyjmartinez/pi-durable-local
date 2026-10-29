@@ -1,7 +1,8 @@
 // Session-scoped durable documents: every conversation in the daemon reads and writes the same copies.
 import { appendFileSync } from "node:fs";
 import { defineDoc } from "@earendil-works/pi-durable";
-import { AUDIT_LOG } from "./config.ts";
+import { AUDIT_LOG, loadSecrets } from "./config.ts";
+import { type NotifyEvent, notify } from "./notify.ts";
 
 export type SessionInfo = {
 	/** pi-durable ConversationId (a branded number). */
@@ -91,6 +92,29 @@ export function audit(event: string, data: Record<string, unknown>): void {
 		appendFileSync(AUDIT_LOG, `${JSON.stringify({ at: new Date().toISOString(), event, ...data })}\n`, { mode: 0o600 });
 	} catch {
 		// Auditing must never take a tool call down.
+	}
+	const message = notificationFor(event, data);
+	// PD_NOTIFY_URL (ntfy.sh topic, Discord webhook, or any JSON endpoint) is a secret: it lives in the env file.
+	if (message !== undefined) void notify(message, { webhookUrl: loadSecrets().PD_NOTIFY_URL ?? process.env.PD_NOTIFY_URL });
+}
+
+/** The audit events worth a phone notification. */
+export function notificationFor(event: string, data: Record<string, unknown>): NotifyEvent | undefined {
+	const pr = data.repo !== undefined && data.pr !== undefined ? `${String(data.repo)}#${String(data.pr)}` : undefined;
+	const url = pr === undefined ? undefined : `https://github.com/${String(data.repo)}/pull/${String(data.pr)}`;
+	switch (event) {
+		case "merged":
+			return { type: "merged", title: `Merged ${pr}`, text: `tier ${String(data.tier ?? "?")} by ${String(data.session ?? "a session")}`, ...(url ? { url } : {}) };
+		case "parked":
+			return { type: "parked", title: `Needs you: ${pr}`, text: [String(data.reason ?? ""), ...((data.details as string[] | undefined) ?? [])].join("\n"), ...(url ? { url } : {}) };
+		case "loop_report":
+			return data.status === "blocked" ? { type: "loop_blocked", title: `Loop ${String(data.loop)} blocked`, text: String(data.note ?? "") } : undefined;
+		case "loop_budget":
+			return { type: "budget_hit", title: `Loop ${String(data.loop)} hit its budget`, text: String(data.note ?? "") };
+		case "tick_error":
+			return { type: "tick_error", title: `pr_tick failed on ${pr}`, text: String(data.error ?? ""), ...(url ? { url } : {}) };
+		default:
+			return undefined;
 	}
 }
 

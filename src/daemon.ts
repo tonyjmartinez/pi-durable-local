@@ -22,7 +22,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
-import { dryRunGates, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
+import { dryRunGates, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
 import { Approvals, audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -397,6 +397,12 @@ server.listen(SOCKET_PATH, async () => {
 	await chmod(SOCKET_PATH, 0o600);
 	log(`pdd listening on ${SOCKET_PATH}, store ${DB_PATH}`);
 });
+
+// Every 6 hours, turn repeated guard blocks into friction issues on this repo (deduplicated by rule).
+const frictionTimer = setInterval(() => {
+	void sweepAuditFriction(context).then((filed) => filed > 0 && log(`friction sweep filed ${filed} issue(s)`)).catch((error) => log("friction sweep failed", String(error)));
+}, 6 * 60 * 60 * 1000);
+frictionTimer.unref();
 
 let closing = false;
 async function shutdown(signal: string) {
