@@ -157,7 +157,7 @@ async function status() {
  * The factory's front door: clone a GitHub repo with the daemon's credentials (agents have none), register a session
  * for it, and optionally start a loop on a goal.
  */
-async function startProject(body: { repo?: string; name?: string; purpose?: string; goal?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number; baseBranch?: string }) {
+async function startProject(body: { repo?: string; name?: string; purpose?: string; goal?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number; baseBranch?: string; merge?: boolean }) {
 	const repo = String(body.repo ?? "");
 	if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new HttpError(400, "repo must be owner/name");
 	const name = String(body.name ?? repo.split("/")[1]!.replace(/\.[a-z]+$/i, "")).toLowerCase();
@@ -170,10 +170,16 @@ async function startProject(body: { repo?: string; name?: string; purpose?: stri
 		});
 		audit("cloned", { repo, dir });
 	}
-	if (body.baseBranch) {
-		// Where PRs for this repo should land, for repos whose GitHub default isn't the deploy branch.
+	if (body.baseBranch || body.merge) {
 		const policy = JSON.parse(readFileSync(POLICY_FILE, "utf8"));
-		policy.automerge = { ...policy.automerge, baseBranches: { ...policy.automerge?.baseBranches, [repo]: body.baseBranch } };
+		policy.automerge ??= {};
+		// Where PRs for this repo should land, for repos whose GitHub default isn't the deploy branch.
+		if (body.baseBranch) policy.automerge.baseBranches = { ...policy.automerge.baseBranches, [repo]: body.baseBranch };
+		// The human running `pd factory --merge` is the approval; it is audited like any other.
+		if (body.merge) {
+			policy.automerge.repos = [...new Set([...(policy.automerge.repos ?? []), repo])];
+			audit("automerge_enabled", { repo, by: "pd factory --merge" });
+		}
 		writeFileSync(POLICY_FILE, `${JSON.stringify(policy, null, "\t")}\n`);
 	}
 	const existing = (await harness.snapshot(Sessions, context))?.byName[name];

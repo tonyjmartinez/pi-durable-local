@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Context } from "@earendil-works/chord/context";
@@ -26,7 +27,7 @@ import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, typ
 import { checkToolCall, protectedMatches } from "./guard.ts";
 import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
 import { effectiveRisk, type ParsedPr, parsePrBody, PR_TEMPLATE, type RiskFile, riskFloor, type Tier } from "./prtemplate.ts";
-import { Approvals, audit, type Loop, Loops, type Memory, Memories, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
+import { Approvals, audit, type Loop, Loops, type Memory, Memories, Parked, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
 
 const run = promisify(execFile);
 
@@ -544,6 +545,18 @@ async function checksFor(repo: string, sha: string, context: Context): Promise<P
 	return checks;
 }
 
+/** Unresolved review threads (a read-only GraphQL query by the daemon). */
+async function unresolvedThreadsOf(repo: string, number: number, context: Context): Promise<{ path?: string; line?: number; body?: string }[]> {
+	const [owner, name] = repo.split("/");
+	const query = "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:50){nodes{isResolved path line comments(first:1){nodes{body}}}}}}}";
+	const out = JSON.parse(await gh(["api", "graphql", "-f", `query=${query}`, "-F", `o=${owner}`, "-F", `n=${name}`, "-F", `p=${number}`], context)) as {
+		data: { repository: { pullRequest: { reviewThreads: { nodes: { isResolved: boolean; path?: string; line?: number; comments: { nodes: { body: string }[] } }[] } } } };
+	};
+	return out.data.repository.pullRequest.reviewThreads.nodes
+		.filter((t) => !t.isResolved)
+		.map((t) => ({ ...(t.path ? { path: t.path } : {}), ...(t.line ? { line: t.line } : {}), body: t.comments.nodes[0]?.body ?? "" }));
+}
+
 export type ShipFacts = { pr: PrView; state: PrTickState; tier: { tier: Tier; reasons: string[] }; parsed: ParsedPr; reviewKey: string };
 
 /** Everything decidePr needs, gathered by the daemon from GitHub. Nothing here is taken from the agent's word alone. */
@@ -570,6 +583,7 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 	if (parsed.missing.length > 0) needsHuman.push(`PR description is missing: ${parsed.missing.join(", ")}`);
 	if (parsed.testing?.ranNothing) needsHuman.push("Testing says nothing was run");
 	// The review covers this exact commit AND this exact description: editing either needs a fresh review.
+	const unresolvedThreads = await unresolvedThreadsOf(repo, number, context).catch(() => []);
 	const reviewKey = `${repo}#${number}@${pr.headRefOid}:${createHash("sha256").update(`${pr.title}\n${pr.body ?? ""}`).digest("hex").slice(0, 16)}`;
 	const review = (await reader.snapshot(Reviews, context))?.byHead[reviewKey];
 	const approval = (await reader.snapshot(Approvals, context))?.byPr[`${repo}#${number}`];
@@ -580,6 +594,7 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 		behind: pr.mergeStateStatus === "BEHIND",
 		checks: await checksFor(repo, pr.headRefOid, context),
 		reviewDecision: pr.reviewDecision || null,
+		unresolvedThreads,
 		tier: tier.tier,
 		door: parsed.door ?? "one-way",
 		mergeAllowed: rules.repos.includes(repo) && pr.headRefName.startsWith(rules.branchPrefix),
@@ -599,7 +614,7 @@ export const SHIP_OPTIONS: Partial<PrTickOptions> = {
 	requireChecks: true,
 };
 
-export type TickOutcome = { decision: PrDecision; facts: ShipFacts; merged?: boolean; reviewed?: boolean };
+export type TickOutcome = { decision: PrDecision; facts: ShipFacts; merged?: boolean; reviewed?: boolean; firstPark?: boolean };
 
 /**
  * Advance a PR as far as the daemon itself can: run the independent review when due, merge when everything says
@@ -617,7 +632,7 @@ export async function tickPr(
 	let facts = await gatherShipFacts(repo, number, policy, harnessLike, context);
 	let decision = decidePr(facts.state, SHIP_OPTIONS);
 	let reviewed = false;
-	if (decision.action === "review") {
+	const runReview = async () => {
 		const diff = await gh(["api", `repos/${repo}/pulls/${number}`, "-H", "Accept: application/vnd.github.diff"], context);
 		const verdict = await reviewWith(models, policy, context)(facts.pr, diff);
 		await harnessLike.commit(async (tx) => {
@@ -627,6 +642,11 @@ export async function tickPr(
 		reviewed = true;
 		facts = await gatherShipFacts(repo, number, policy, harnessLike, context);
 		decision = decidePr(facts.state, SHIP_OPTIONS);
+	};
+	if (decision.action === "review") await runReview();
+	// A PR parked for a human (with green CI) gets the independent review too, so Tony sees it with the park.
+	else if (decision.action === "park-human" && facts.state.aiReview === undefined && facts.state.checks.some((c) => c.bucket === "pass")) {
+		await runReview();
 	}
 	if (decision.action === "merge" && options.allowMerge) {
 		const subject = `${facts.pr.title} (#${number})`;
@@ -639,7 +659,17 @@ export async function tickPr(
 		return { decision, facts, merged: true, reviewed };
 	}
 	if (decision.action === "park-human" || decision.action === "no-merge-authority") {
-		audit("parked", { session: options.session, repo, pr: number, action: decision.action, reason: decision.reason, details: decision.details });
+		const first = await harnessLike.commit(async (tx) => {
+			const parked = await tx.doc(Parked);
+			if (parked.byKey[facts.reviewKey] !== undefined) return false;
+			parked.byKey[facts.reviewKey] = Date.now();
+			return true;
+		}, context);
+		if (first) {
+			const review = facts.state.aiReview === undefined ? [] : [`review: ${facts.state.aiReview ? "approved" : "rejected"}${facts.state.aiReviewReasons?.length ? ` (${facts.state.aiReviewReasons.join("; ")})` : ""}`];
+			audit("parked", { session: options.session, repo, pr: number, action: decision.action, reason: decision.reason, details: [...(decision.details ?? []), ...review] });
+		}
+		return { decision, facts, reviewed, firstPark: first };
 	}
 	return { decision, facts, reviewed };
 }
@@ -698,7 +728,8 @@ async function prSummary(repo: string, number: number, context: Context): Promis
 	return `#${pr.number} ${pr.title} [${pr.state}${pr.isDraft ? ", draft" : ""}] ${pr.headRefName} → ${pr.baseRefName}\n${pr.url}\n+${pr.additions} −${pr.deletions} in ${pr.changedFiles} files, mergeable=${pr.mergeable}, review=${pr.reviewDecision || "none"}\nChecks on ${pr.headRefOid.slice(0, 7)}:\n${checks}`;
 }
 
-export const FACTORY_REPO = "tonyjmartinez/pi-durable-local";
+/** Where factory friction goes: this repo's own GitHub origin (works in any fork). */
+export const FACTORY_REPO = githubRepoOf(readOriginUrl(fileURLToPath(new URL("..", import.meta.url)))) ?? "tonyjmartinez/pi-durable-local";
 
 /** File one friction issue, or comment on the open one it duplicates. Labels are created on first use. */
 export async function fileFriction(repo: string, input: FrictionInput, context: Context): Promise<{ url?: string; duplicateOf?: number }> {
@@ -944,7 +975,7 @@ export const Git_ = defineExtension({
 				if (session === undefined || repo === undefined) return fail("This session has no GitHub repo.");
 				try {
 					const outcome = await tickPr(repo, args.number, api.models, { snapshot: api.snapshot.bind(api), commit: harness().commit.bind(harness()) }, context, { allowMerge: true, session: session.name });
-					if (!outcome.merged && outcome.decision.action === "park-human") {
+					if (!outcome.merged && outcome.decision.action === "park-human" && outcome.firstPark) {
 						const body = `🅿️ **pi-durable parked this PR for a human**\n\n${outcome.decision.reason}${(outcome.decision.details ?? []).map((d) => `\n- ${d}`).join("")}\n\nApprove the current head with \`pd approve ${repo} ${args.number}\`, or merge it yourself.`;
 						await gh(["pr", "comment", String(args.number), "--repo", repo, "--body", body], context).catch(() => undefined);
 					}

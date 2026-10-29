@@ -142,3 +142,12 @@ export const Approvals = defineDoc<{ byPr: Record<string, { sha: string; at: num
 	initial: () => ({ byPr: {} }),
 	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
 });
+
+/** Parked PRs already reported, by review key, so a park notifies once per head commit and description. */
+export const Parked = defineDoc<{ byKey: Record<string, number> }>({
+	kind: "pdl.parked",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byKey: {} }),
+	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
+});

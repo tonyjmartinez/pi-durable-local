@@ -41,7 +41,6 @@ export type Policy = {
 		protectedPaths: string[];
 		/** Require at least one CI check to exist and pass (a repo with no CI is never auto-merged). */
 		requireChecks: boolean;
-		requireAiReview: boolean;
 		mergeMethod: "squash" | "merge" | "rebase";
 	};
 	loops: {
@@ -89,13 +88,26 @@ export const DEFAULT_POLICY: Policy = {
 			"**/wrangler.json",
 			"**/wrangler.jsonc",
 			"pnpm-lock.yaml",
+			"**/Cargo.toml",
+			"**/Cargo.lock",
+			"**/go.mod",
+			"**/go.sum",
+			"**/requirements*.txt",
+			"**/pyproject.toml",
+			"**/poetry.lock",
+			"**/uv.lock",
+			"**/Gemfile",
+			"**/Gemfile.lock",
+			"**/composer.json",
+			"**/build.gradle*",
+			"**/pom.xml",
+			"**/bun.lockb",
 			"yarn.lock",
 			"CODEOWNERS",
 			".pi/**",
 			"AGENTS.md",
 		],
 		requireChecks: true,
-		requireAiReview: true,
 		mergeMethod: "squash",
 	},
 	loops: { defaultBudgetUsd: 5, defaultIntervalMinutes: 60, defaultMaxIterations: 24 },

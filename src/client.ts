@@ -262,6 +262,12 @@ function doctor(): void {
 	ok("agent sandbox (bubblewrap) hides ~/.ssh and makes $HOME read-only", probe.status === 0, "install bubblewrap: sudo apt install bubblewrap");
 	const gh = spawnSync("gh", ["auth", "status"], { encoding: "utf8" });
 	ok("GitHub CLI logged in", gh.status === 0, "gh auth login --git-protocol ssh --web");
+	const notifyUrl = secrets.PD_NOTIFY_URL;
+	ok(
+		notifyUrl ? `phone notifications → ${new URL(notifyUrl).host}` : "phone notifications (PD_NOTIFY_URL)",
+		Boolean(notifyUrl && /^https:\/\//.test(notifyUrl)),
+		`install the ntfy app, subscribe to a private topic, then: echo 'PD_NOTIFY_URL=https://ntfy.sh/<topic>' >> ${ENV_FILE}`,
+	);
 	const policy = JSON.parse(readFileSync(POLICY_FILE, "utf8"));
 	ok(`auto-merge repos: ${policy.automerge.repos.join(", ") || "none (PRs stay open)"}`, true);
 }
@@ -279,7 +285,7 @@ function tmux(names: string[]): void {
 
 const HELP = `pd — pi-durable sessions that keep running
 
-  pd factory <owner/repo> ["goal"] [--base main] [--every 60] [--max 20] [--budget 5] [--name n]
+  pd factory <owner/repo> ["goal"] [--base main] [--merge] [--every 60] [--max 24] [--budget 5] [--name n]
                                             clone, create a session, and (with a goal) start a loop
   pd status                                 sessions, loops, spend
   pd new <name> --cwd <dir> [--purpose "…"] [--model provider/id]
@@ -337,12 +343,14 @@ async function main(argv: string[]): Promise<void> {
 				name: typeof opts.name === "string" ? opts.name : undefined,
 				purpose: typeof opts.purpose === "string" ? opts.purpose : undefined,
 				baseBranch: typeof opts.base === "string" ? opts.base : undefined,
+				merge: opts.merge === true,
 				intervalMinutes: opts.every ? Number(opts.every) : undefined,
 				maxIterations: opts.max ? Number(opts.max) : undefined,
 				budgetUsd: opts.budget ? Number(opts.budget) : undefined,
 			});
 			console.log(`session ${c.bold(result.session.name)} in ${result.session.cwd}`);
 			if (result.loop) printLoop(result.loop);
+			if (!opts.merge) console.log(c.dim("auto-merge is off for this repo (PRs park as no-merge-authority); add --merge to allow gated merges"));
 			else console.log(c.dim(`no goal given; start one with: pd loop start ${result.session.name} "goal"`));
 			return;
 		}
