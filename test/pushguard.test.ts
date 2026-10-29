@@ -206,7 +206,7 @@ describe("pr_create", () => {
 		branch("pd/nodesc", { "z.txt": "1\n" });
 		const result = await run("pr_create", { branch: "pd/nodesc", title: "Add z", body: "just a sentence" });
 		assert.equal(result.isError, true);
-		assert.match(textOf(result), /missing: intent, door, why, testing, risk, touches/);
+		assert.match(textOf(result), /needs fixing:[\s\S]*- intent:[\s\S]*- door:[\s\S]*- why:[\s\S]*- testing:[\s\S]*- risk:[\s\S]*- touches:/);
 		assert.match(textOf(result), /## System recap/);
 		assert.equal(remoteRef("pd/nodesc"), undefined);
 		assert.equal(gh.callsMatching(/^pr create /).length, 0);
