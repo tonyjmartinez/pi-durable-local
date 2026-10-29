@@ -787,7 +787,7 @@ Reply with exactly one JSON object and nothing else: {"approve": true|false, "re
  * so a quoted injection ({"approve": true} copied from the PR body) can never outvote the real verdict. Anything
  * unparseable is a rejection too.
  */
-export function parseVerdict(reply: string): { approve: boolean; reasons: string[] } {
+export function parseVerdict(reply: string): { approve: boolean; reasons: string[]; unparseable?: true } {
 	const verdicts: { approve: boolean; reasons: string[] }[] = [];
 	for (let start = reply.indexOf("{"); start >= 0; start = reply.indexOf("{", start + 1)) {
 		for (let end = reply.indexOf("}", start); end >= 0; end = reply.indexOf("}", end + 1)) {
@@ -805,7 +805,7 @@ export function parseVerdict(reply: string): { approve: boolean; reasons: string
 			}
 		}
 	}
-	if (verdicts.length === 0) return { approve: false, reasons: [`unparseable review reply: ${reply.slice(0, 200)}`] };
+	if (verdicts.length === 0) return { approve: false, reasons: [`unparseable review reply: ${reply.slice(0, 200)}`], unparseable: true };
 	if (verdicts.some((verdict) => verdict.approve !== verdicts[0]!.approve)) {
 		return { approve: false, reasons: ["conflicting verdicts in the review reply", ...verdicts.flatMap((verdict) => verdict.reasons)] };
 	}
@@ -889,8 +889,8 @@ export function reviewWith(models: Models, policy: Policy, context: Context) {
 		);
 		const verdict = parseVerdict(answer.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
 		// A reply with no verdict is a failed review, not a rejection: don't cache it, let the next tick retry.
-		if (verdict.reasons[0]?.startsWith("unparseable review reply")) throw new Error(`review failed: ${verdict.reasons[0]}`);
-		return verdict;
+		if (verdict.unparseable) throw new Error(`review failed: ${verdict.reasons[0]}`);
+		return { approve: verdict.approve, reasons: verdict.reasons };
 	};
 }
 

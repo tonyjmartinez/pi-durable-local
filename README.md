@@ -15,7 +15,7 @@ One daemon, `pdd`, owns a pi-durable SQLite store at `~/.local/share/pi-durable/
 - **Web access.** `web_search` (Anthropic server-side search) and `web_fetch` (public http(s) only; private and local addresses are blocked).
 - **A local web UI.** `pd ui` serves a small page on 127.0.0.1 for watching and steering sessions from a phone or desktop.
 
-Why one process: pi-durable has no cross-process locking on its store. Two processes opening the same SQLite file would corrupt each other's state, so exactly one daemon opens it and everything else goes through the socket.
+Why one process: pi-durable has no cross-process locking on its store. Two processes opening the same SQLite file would corrupt each other's state, so exactly one daemon opens it and everything else goes through the socket. The daemon enforces this itself: at startup it connects to the socket first, and if another daemon answers it exits before touching the store, so a stray `npm run daemon` cannot corrupt a running one.
 
 ## Install
 
@@ -66,7 +66,7 @@ pd mem add "topic" "fact" [--project <dir>]
 pd mem rm <id>
 
 pd gates <owner/repo> <pr>                dry-run pr_tick (including the AI review); never merges
-pd approve <owner/repo> <pr>              approve a parked PR's current head commit
+pd approve <owner/repo> <pr> <sha7>       approve a parked PR at the commit you reviewed (from the park comment)
 pd audit                                  safety decisions and merges
 pd retry <taskId>                         rerun a parked task
 pd doctor                                 check setup
@@ -112,7 +112,7 @@ Agents never hold GitHub credentials. They commit locally and call tools that th
 
 **Getting code to GitHub.**
 - `git_sync` refreshes the daemon's read-only mirror of the repo's GitHub branches and tells the agent which `git fetch` to run from the mirror, since the agent cannot fetch from GitHub itself.
-- `git_push` pushes a work branch. The daemon fetches the branch from the agent's repo into a bare mirror it owns (`~/.local/share/pi-durable/mirrors/<session>.git`), then pushes from the mirror to the remote recorded when the session was created. It never runs git with agent-controlled config or hooks. Branches must start with the work-branch prefix (`pd/` by default).
+- `git_push` pushes a work branch. The daemon fetches the branch from the agent's repo into a bare mirror it owns (`~/.local/share/pi-durable/mirrors/<session>.git`), then pushes from the mirror to the remote recorded when the session was created. It never runs git with agent-controlled config or hooks. Branches must start with the work-branch prefix (`pd/` by default), and each branch belongs to the first session that pushes it: another session cannot push or force-push it, so one session cannot rewrite another's PR head. The daemon refuses any push whose diff against the base branch touches `.github/` (audited as `push_refused`), because GitHub runs a workflow file from a pushed branch with the repository's secrets before any review or merge. Agents write a proposed workflow to `docs/proposed-ci/<name>.yml` instead and ask you to install it.
 - `pr_create` pushes and opens a PR against the repo's deploy branch. The description must fill the PR template or the call is refused with the template in the error. `pr_edit` replaces the title or body of the agent's own open work-branch PR. `pr_status` and `pr_list` read PRs and CI.
 
 **The PR template** (`src/prtemplate.ts`) has these fields: Intent, Door (`two-way` or `one-way`), Cleanup, Why, Testing (the commands actually run and their results, and what could not be verified), and a System recap with Risk (`low`, `medium`, `high`) and Touches (an area and whether the change `composes`, `extends`, or `adds`).
@@ -123,25 +123,25 @@ Agents never hold GitHub credentials. They commit locally and call tools that th
 2. Draft: `mark-ready`. Conflicts: `resolve-conflicts`. Behind its base: `update-branch`.
 3. A failing or cancelled check: `fix-ci`. A pending check: `wait-ci`.
 4. No passing check at all (with `requireChecks`): `park-human`.
-5. A reviewer requested changes, there are unresolved review threads (read by the daemon through a read-only GraphQL query), or the independent review rejected this head: `address-review`.
+5. A reviewer requested changes, there are unresolved review threads (read by the daemon through a read-only GraphQL query), or the independent review rejected this head: `address-review`. If the threads cannot be read, or there are more than 100, the PR parks for a human instead of being treated as having none.
 6. Unless a human approved this head: a one-way door, any reason in the PR's "needs a human" list, or a high risk tier: `park-human`.
 7. The repo is not in `automerge.repos`, or the head branch lacks the prefix: `no-merge-authority`.
 8. No review of this head and description yet: the daemon runs the independent review itself, then decides again.
 9. Otherwise: merge.
 
-A PR that would park for a human, and has at least one passing check, is reviewed too, so the review result is attached when it parks.
+A PR that would park for a human, and has at least one passing check, is reviewed too, so the review result is attached when it parks. PRs the factory does not own (from a fork, by another author, or on a branch outside the work prefix) are never reviewed, so they cost nothing.
 
 The reasons that always park a PR for a human are: it comes from a fork; its author is not the daemon's own GitHub account; it does not target the deploy branch; it changes more than `maxChangedFiles` files or `maxChangedLines` lines; it touches a protected path (checked on both sides of a rename); its description is missing template fields; its Testing section says nothing was run; or it declares no Door, which counts as one-way.
 
 **Risk tiers.** The diff earns a floor: high for a protected path or more than 400 changed lines; medium for more than 100 lines, a test changed alongside the code it tests, or a config file changed; otherwise low. The agent's declared Risk can only raise it. Low and medium PRs may auto-merge; high always waits for you. Every PR gets the independent review, including one that parks for a human: if it would park and CI has at least one passing check, the daemon reviews it first, so you see the verdict with the park.
 
-**CI.** Only GitHub Actions check runs on the exact head commit count as a pass. Commit statuses and check runs from other apps can block a PR but never pass it, because anyone with a token can post one.
+**CI.** Only GitHub Actions check runs on the exact head commit count as a pass. Commit statuses and check runs from other apps can block a PR but never pass it, because anyone with a token can post one. All pages of check runs are read, not just the first 100. For 90 seconds after the daemon pushes a commit, the tick adds a synthetic pending check, because right after a push only the fastest workflow may have registered and its green must not be mistaken for all of CI.
 
-**The independent review.** A separate Opus call (`reviewModel`) reads the title, description and diff and replies with a JSON verdict. It is told to treat all three as untrusted data written by the agent under review. Conflicting, unparseable or missing verdicts are rejections. The verdict is cached per exact head commit plus a hash of the title and description, so it runs once per state of the PR and runs again after any push or `pr_edit`.
+**The independent review.** A separate Opus call (`reviewModel`) reads the title, description and diff and replies with a JSON verdict. It is told to treat all three as untrusted data written by the agent under review. The PR text is placed inside a random per-call delimiter the PR cannot forge. The diff is fetched for the exact head commit being keyed (a compare against the base), and if the head, title or description changes while the review runs, the tick fails and reviews again, so a verdict can never be stored for a commit it did not read. A diff over 200,000 characters is rejected as too large to review, never truncated. Conflicting verdicts are a rejection. A reply with no verdict at all is a failed review: the tick errors, nothing is cached, and the next tick retries. The verdict is cached per exact head commit plus a hash of the title and description, so it runs once per state of the PR and runs again after any push or `pr_edit`.
 
 **The merge.** A squash merge (or the configured method) pinned to the head commit that was checked (`--match-head-commit`), with the branch deleted. If the branch moved after the check, the merge fails and the next tick starts over.
 
-**Parking and approving.** When a PR parks, the daemon records it in the audit log and sends a notification, and (for `park-human`) comments on the PR with the reasons and the review verdict. This happens once per head commit and description: a record of parked PRs (keyed like the review cache) stops repeat notifications and comments while the PR sits unchanged, and a push or an edit parks it afresh. To approve it, read the PR and run `pd approve owner/repo 54`. The approval is pinned to the head SHA you saw, so a later push needs a new one. Approval lifts the human-only limits (risk tier, one-way door, the needs-a-human reasons); it never skips CI, the review, or merge authority.
+**Parking and approving.** When a PR parks, the daemon records it in the audit log and sends a notification, and (for `park-human`) comments on the PR with the reasons and the review verdict. This happens once per head commit and description: a record of parked PRs (keyed like the review cache) stops repeat notifications and comments while the PR sits unchanged, and a push or an edit parks it afresh. The comment and the notification show the short SHA of the head that was reviewed. To approve it, read the PR and run `pd approve owner/repo 54 <sha7>` with that SHA. The command is refused if you omit the SHA, or if the PR's head has moved since (a 409 that tells you to review the new commit), so you can only approve a commit you saw. The approval is pinned to that head, so a later push needs a new one. Approval lifts the human-only limits (risk tier, one-way door, the needs-a-human reasons); it never skips CI, the review, or merge authority.
 
 `pr_merge` is kept for older prompts and behaves exactly like `pr_tick`. To see what the ship loop would do to a real PR without merging, run `pd gates owner/repo 54`: it runs everything, including the AI review, even for a repo that is not allowlisted.
 
@@ -155,7 +155,7 @@ pd loop start myproj "Get the test suite green and the docs current" --every 30 
 
 Defaults come from the policy: 60 minutes between iterations, 24 iterations, 5 USD. Spend is the session's cost since the loop started, including its subagents. `pd loop set <id>` changes the interval (5 minutes or more), the iteration cap, or the budget of an existing loop; a new interval applies after the iteration already scheduled.
 
-Lifecycle: `active` while scheduled; `paused` when you pause it, when the budget is reached, or when the agent reports `blocked`; `done` when the goal is achieved, the iteration cap is reached, or you stop it; `failed` if the session disappears. `pd loop resume <id>` reactivates a paused loop with a fresh budget window. Loops run in the background, so they do not mark the session as busy.
+Lifecycle: `active` while scheduled; `paused` when you pause it, when the budget is reached, or when the agent reports `blocked`; `done` when the goal is achieved, the iteration cap is reached, or you stop it; `failed` if the session disappears. `pd loop resume <id>` reactivates a paused loop with a fresh budget window (subagent spend included); resuming a loop that is already active is refused. A crash in the middle of an iteration resumes that same iteration, waiting on the same submission, instead of starting another. Loops run in the background, so they do not mark the session as busy.
 
 Each iteration sends the session a prompt that tells it to orient (memory, git status, open PRs, CI, the last iteration's notes); finish any open PR of its own first with the `pr_tick` loop; otherwise take the next step, which may be planning early on or implementation on a fresh `pd/...` branch with tests, opened as a PR; save what the next iteration needs with `memory_save`; and end by calling `loop_report` with `continue`, `done`, or `blocked` and a one-line note. `blocked` pauses the loop until you resume it and sends a notification.
 
@@ -266,13 +266,27 @@ Default `protectedPaths`: CI config (`.github`, GitLab, CircleCI), env and key f
 
 **The audit log.** Blocks, pushes, PRs, reviews, merges, parks, refusals, gate dry runs, subagent calls, loop events and skips, friction filings, and daemon errors are appended to `~/.local/share/pi-durable/audit.jsonl` (mode 0600). `pd audit` shows the latest, and the web UI has a filterable view.
 
+**Web fetches.** `web_fetch` runs in the daemon, outside the sandbox, so it is restricted on its own. It accepts only http and https. Before contacting any host it resolves the name and refuses it if any resulting address is loopback, private, link-local, carrier-grade NAT, multicast, reserved, or an IPv4-mapped IPv6 form of one of those; it also refuses `localhost` and names ending in `.local`, `.internal`, or `.localhost`. Redirects are followed by hand, at most 5, and every hop is checked the same way before it is contacted. Responses are read to at most 2 MB, and a request times out after 30 seconds.
+
 ### Limits
 
 - The guard is regex-based and best effort, not a sandbox. With bubblewrap present it is a second layer; without it, it is the only layer.
-- `read`, `write`, `edit`, and `web_fetch` run inside the daemon, not the sandbox; they are covered by the guard's path checks only.
+- `read`, `write`, and `edit` run inside the daemon, not the sandbox; they are covered by the guard's path checks only. `web_fetch` also runs there, with the network checks above.
 - The sandbox is Linux-only (bubblewrap). On macOS there is no equivalent yet.
 - The review model can be wrong. Merging low and medium risk changes after one model's approval is a deliberate trade for speed; the protected-path list, size limits, CI requirement and risk tiers exist to keep the changes that reach that point small and boring.
 - Commit statuses and checks from other apps never count as passing CI, so a repo whose only CI is an external app will park every PR.
+
+### Residual risks
+
+Known gaps that are accepted for now:
+
+- **CI runs agent-written code.** A PR's CI jobs execute whatever the agent wrote, and the factory cannot stop that. Agents cannot push workflow files, but a `pull_request` workflow you installed still runs their code. Keep deploy and other high-value secrets out of `pull_request` jobs: put them in GitHub environments with required reviewers, and give pull-request workflows read-only tokens and no secrets.
+- **DNS lookup to connect gap in `web_fetch`.** The check resolves the hostname and then the request resolves it again, so a name that changes its answer between the two (DNS rebinding) can get past the address check. Closing it needs a connection that is pinned to the checked address.
+- **The mirror fetch reads the agent's repo.** `git_push` fetches the branch from the agent's working repository, and the git process that serves that fetch reads the repo's own config. Hooks, ssh commands and global config are disabled, and no way to run a command through it is known, but the fetch is not sandboxed.
+- **Shared memory is shared.** Every session reads shared memory in its system prompt and any session, including a subagent that has read web pages, can write to it, so one poisoned page could plant instructions for all sessions. Review `pd mem` now and then.
+- **The `deep` subagent tier is advisory.** It needs a `why`, which is audited, but nothing checks that the reason is good.
+- **The audit log is not rotated.** `pd audit`, the web UI and the friction sweep read only the tail, so it stays fast, but the file grows without limit.
+- **A loop iteration has no time limit.** The budget is checked between iterations, so one iteration, including its subagents, can spend more than the budget before the loop pauses.
 
 ## Development
 
@@ -300,6 +314,9 @@ The pure modules (guard, template, tick, gate, friction, notify, redact) are cov
 
 - **Logs:** `tail -f ~/.local/share/pi-durable/pdd.log`
 - **"pdd is not running":** `pdd-up`, then `pd doctor`.
+- **"pdd is already running" when starting the daemon by hand:** that is the guard working; use `pdd-up stop` first, or just use the daemon that is running.
+- **A push was refused:** the `pd audit` entry `push_refused` lists the paths. A work branch may not change anything under `.github/`; ask the agent to put the proposal in `docs/proposed-ci/` and install it yourself.
+- **`pd approve` says the head moved:** the agent pushed after the park comment. Read the new commit and approve with its short SHA.
 - **Restart after changing code or secrets:** `pdd-up stop && pdd-up`. Every committed step survives the restart. The policy file and `PD_NOTIFY_URL` are re-read without a restart.
 - **Parked tasks:** if a task cannot make progress it is parked and listed by `pd status` under "Parked tasks" with its id and reason. Fix the cause, then `pd retry <taskId>`.
 - **Credit balance errors:** if the Anthropic account runs out of credit, model requests fail with a 400 and the message that triggered them is marked unanswered (an attached session shows `[unanswered: ...]`). Nothing is lost: add credit and send the message again. A loop iteration that fails this way is recorded in the loop's note, and the loop tries again at its next interval. Credits bought in the Claude app do not apply to the API; the key needs API credits.
