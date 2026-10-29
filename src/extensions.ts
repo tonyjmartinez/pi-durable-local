@@ -26,6 +26,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
 import { type GatePr, type GateRepo, shouldWake } from "./loopgate.ts";
+import { dailyBudget, nextRoomAt, recordSpend } from "./spend.ts";
 import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, type FrictionInput, frictionFromAudit } from "./friction.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
 import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
@@ -412,7 +413,7 @@ export const Web_ = defineExtension({
 			description: "Fetch a public web page or raw file and return it as text. Public http(s) URLs only.",
 			parameters: Type.Object({
 				url: Type.String(),
-				maxChars: Type.Optional(Type.Number({ default: 30_000 })),
+				maxChars: Type.Optional(Type.Number({ default: 8_000, description: "Raise only when you need the whole page" })),
 			}),
 			replay: "safe",
 			execute: async (args, _api, context) => {
@@ -460,7 +461,7 @@ export const Web_ = defineExtension({
 				const raw = Buffer.concat(chunks).toString("utf8");
 				const type = response.headers.get("content-type") ?? "";
 				const body = type.includes("html") ? htmlToText(raw) : raw;
-				const max = args.maxChars ?? 30_000;
+				const max = args.maxChars ?? 8_000;
 				return text(
 					`${response.status} ${url.href}${total >= FETCH_MAX_BYTES ? " (cut at 2 MB)" : ""}\n\n${body.length > max ? `${body.slice(0, max)}\n…(truncated, ${body.length} chars total)` : body}`,
 				);
@@ -1228,9 +1229,35 @@ Ongoing goal: ${loop.goal}
 Advance this goal by one meaningful, reviewable step, then stop. Each iteration:
 1. Orient: check memory, git status, open PRs (\`pr_list\`, \`pr_status\`), CI results, and notes from the last iteration.
 2. If a previous PR of yours is open: run the pr_tick loop on it first. Prefer finishing over starting.
-3. Delegate research and fact-checking to a fast \`subagent\` (it returns conclusions, keeping your context small). Then pick the next step. Early on that may be conceptual work (a PLAN.md, a spike); later, implementation on a fresh \`${policy.automerge.branchPrefix}…\` branch from the latest deploy branch (call \`git_sync\` first), with tests, verified, opened with \`pr_create\`, then driven with \`pr_tick\`.
+3. Any web_search or web_fetch, and any reading of more than a few files, goes to a fast \`subagent\`; keep only its conclusions in your own context (every token you keep is re-read on every later turn). Then pick the next step. Early on that may be conceptual work (a PLAN.md, a spike); later, implementation on a fresh \`${policy.automerge.branchPrefix}…\` branch from the latest deploy branch (call \`git_sync\` first), with tests, verified, opened with \`pr_create\`, then driven with \`pr_tick\`.
 4. Save what the next iteration needs to know with memory_save (project scope). If anything this iteration cost you a retry or a blocked step, file it with \`friction_file\`.
 5. Finish by calling loop_report with status "continue", "done" (goal fully achieved), or "blocked" (needs Tony), and a one-line note.`;
+}
+
+/**
+ * Whether a loop may start its iteration from a fresh context: only when the newest input in the conversation is
+ * the loop's own previous tick (or there is none). A person's or another session's message means a live
+ * conversation that must not be wiped.
+ */
+export const RESET_WINDOW = 50;
+
+export function mayResetForLoop(newestFirst: readonly { kind: string }[], windowSize = RESET_WINDOW): boolean {
+	const lastInput = newestFirst.find((entry) => entry.kind === "pi.user" || entry.kind === "pdl.peer" || entry.kind === "pdl.loop-tick");
+	// A full window with no input in it means whoever spoke last is further back: unknown, so don't wipe.
+	if (lastInput === undefined) return newestFirst.length < windowSize;
+	return lastInput.kind === "pdl.loop-tick";
+}
+
+/** The note a fresh iteration starts from: the goal, where the last iteration left off, and what is open. */
+export function loopHandoff(loop: Loop, openPrs: readonly number[]): string {
+	return [
+		`Fresh context for loop ${loop.id}; earlier iterations' history was cleared to save cost. Your durable state is project memory (memory_search), git, and GitHub.`,
+		`Goal: ${loop.goal.length > 600 ? `${loop.goal.slice(0, 600)}…` : loop.goal}`,
+		loop.note ? `Last iteration's note: ${loop.note}` : undefined,
+		openPrs.length > 0 ? `Your open PRs: ${openPrs.map((n) => `#${n}`).join(", ")}` : "You have no open PRs.",
+	]
+		.filter((line) => line !== undefined)
+		.join("\n");
 }
 
 type LoopCheckpoint =
@@ -1302,6 +1329,20 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				return stop("paused", `budget reached: $${spent.toFixed(2)} of $${loop.budgetUsd}`);
 			}
 			if (loop.iteration >= loop.maxIterations) return stop("done", `reached ${loop.maxIterations} iterations`);
+			// The factory-wide cap: when all loops together spent the daily budget, wait for room instead of pausing.
+			const allLoops = Object.values((await runtime.snapshot(Loops, context))?.byId ?? {});
+			const daily = dailyBudget(allLoops, Date.now(), policy.loops.dailyBudgetUsd);
+			if (daily.exceeded) {
+				const at = nextRoomAt(allLoops, Date.now(), policy.loops.dailyBudgetUsd) ?? Date.now() + 60 * 60_000;
+				audit("loop_skip", { loop: loop.id, reason: `daily budget $${policy.loops.dailyBudgetUsd} reached ($${daily.spent.toFixed(2)})`, nextCheckMinutes: Math.ceil((at - Date.now()) / 60_000) });
+				await runtime.commit(async (tx) => {
+					const current = (await tx.doc(Loops)).byId[task.input.loopId]!;
+					current.nextRunAt = at;
+					current.note = `waiting: factory daily budget reached`;
+					return { status: "running", checkpoint: { phase: "wait" } };
+				}, context);
+				return;
+			}
 			// The cheap gate: decide from GitHub facts whether a model call is worth it at all.
 			const facts = await gateFacts(loop, session, policy, context).catch(() => undefined);
 			if (facts !== undefined) {
@@ -1322,6 +1363,16 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 
 			const conversation = await harness().conversation(session.conversationId as never, context);
 			if (conversation === undefined) return stop("failed", "conversation missing");
+			// Start from a short handoff rather than re-reading (and re-paying for) every earlier iteration. Only when the
+			// session is idle and nothing but the loop has spoken to it since its last tick.
+			if (policy.loops.freshContext) {
+				const busy = (await harness().inspect(context)).tasks.some((t) => !t.record.background && t.record.conversationId === (session.conversationId as never));
+				const recent = await conversation.entries({}, RESET_WINDOW, undefined, context);
+				if (!busy && mayResetForLoop(recent.items)) {
+					await conversation.reset(loopHandoff(loop, facts?.openAgentPrs.map((pr) => pr.number) ?? []), context);
+					audit("loop_fresh_context", { loop: loop.id, iteration });
+				}
+			}
 			// The loop's spend is the session's cost change across this iteration, measured from just before the prompt.
 			const costBefore = await sessionCost(runtime, loop.session, session.conversationId, context);
 			// The request ID makes a resubmission find the same submission, never a second one.
@@ -1351,7 +1402,11 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				if (current === undefined) return { status: "terminal", outcome: { status: "completed", result: { iterations: iteration } } };
 				current.iteration = iteration + 1;
 				current.lastRunAt = Date.now();
-				if (costBefore !== undefined) current.spent = (current.spent ?? 0) + Math.max(0, costAfter - costBefore);
+				if (costBefore !== undefined) {
+					const delta = Math.max(0, costAfter - costBefore);
+					current.spent = (current.spent ?? 0) + delta;
+					current.spendLog = recordSpend(current.spendLog, delta, Date.now());
+				}
 				current.nextRunAt = Date.now() + current.intervalMinutes * 60_000;
 				// Only a completed iteration counts as having seen this base; a failed one retries even if nothing changed.
 				if (settled?.status === "done" && baseSha !== undefined) current.lastSeenBaseSha = baseSha;

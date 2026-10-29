@@ -4,6 +4,7 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { request } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { analyzeTranscript, formatCostReport } from "./costreport.ts";
 import { DB_PATH, ENV_FILE, loadSecrets, POLICY_FILE, SOCKET_PATH } from "./config.ts";
 
 type Json = any;
@@ -214,6 +215,26 @@ async function attach(name: string): Promise<void> {
 	rl.on("close", () => process.exit(0));
 }
 
+/** The first line of a session's event stream: its snapshot, including the transcript entries. */
+function firstEvent(name: string): Promise<Json> {
+	return new Promise((done, fail) => {
+		const req = request({ socketPath: SOCKET_PATH, method: "GET", path: `/sessions/${name}/events` }, (res) => {
+			let buffer = "";
+			res.setEncoding("utf8");
+			res.on("data", (chunk: string) => {
+				buffer += chunk;
+				const newline = buffer.indexOf("\n");
+				if (newline >= 0) {
+					req.destroy();
+					done(JSON.parse(buffer.slice(0, newline)));
+				}
+			});
+		});
+		req.on("error", (error) => fail(error));
+		req.end();
+	});
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Commands.
 
@@ -307,6 +328,7 @@ const HELP = `pd — pi-durable sessions that keep running
 
   pd gates <owner/repo> <pr>                dry-run pr_tick (incl. AI review), never merges
   pd approve <owner/repo> <pr> <sha7>       approve a parked PR at the commit you reviewed (from the park comment)
+  pd cost [session…]                        per-iteration cost: start context, re-read cost, tools
   pd audit                                  safety decisions and merges
   pd retry <taskId>                         rerun a parked task
   pd doctor                                 check setup`;
@@ -416,6 +438,15 @@ async function main(argv: string[]): Promise<void> {
 					const hay = `${m.topic} ${m.text} ${m.project ?? ""}`.toLowerCase();
 					if (words.every((w) => hay.includes(w))) console.log(`${c.bold(`#${m.id}`)} ${c.cyan(m.topic)} ${c.dim(`(${m.project ?? "global"}, ${m.by}, ${ago(m.updatedAt)})`)}\n    ${m.text}`);
 				}
+			}
+			return;
+		}
+		case "cost": {
+			const names = positional.length > 0 ? positional : ((await call("GET", "/status")).sessions as Json[]).map((x) => x.name);
+			for (const name of names) {
+				const snapshot = await firstEvent(name);
+				console.log(c.bold(`\n== ${name}`));
+				console.log(formatCostReport(analyzeTranscript(snapshot.entries)));
 			}
 			return;
 		}

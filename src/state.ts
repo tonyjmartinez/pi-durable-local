@@ -66,6 +66,8 @@ export type Loop = {
 	 * loops on one session don't charge each other.
 	 */
 	spent?: number;
+	/** Time-stamped charges (last two days), for the factory-wide daily budget. */
+	spendLog?: { at: number; usd: number }[];
 	/** goal (default), cleanup (skips when the base branch is idle), or friction-sweep (skips with no open friction). */
 	kind?: "goal" | "cleanup" | "friction-sweep";
 	skipIfIdleHours?: number;

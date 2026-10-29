@@ -83,7 +83,19 @@ const settings: HarnessSettings = {
 	stream: { timeoutMs: 300_000 },
 	toolExecution: "parallel",
 	afterFailedRun: "continue",
-	compaction: { enabled: true, reserveTokens: 32_768, keepRecentTokens: 40_000 },
+	// Compact long interactive chats around 120k tokens (in the background from ~100k) instead of near the 1M window:
+	// every kept token is re-read on every turn. Loops start each iteration fresh instead (loops.freshContext).
+	compaction: {
+		enabled: true,
+		reserveTokens: 32_768,
+		keepRecentTokens: 20_000,
+		modelOverrides: Object.fromEntries(
+			models
+				.getModels()
+				.filter((m) => m.provider === "anthropic" && m.contextWindow > 200_000)
+				.map((m) => [`anthropic/${m.id}`, { reserveTokens: m.contextWindow - 120_000, keepRecentTokens: 20_000, backgroundTokens: 20_000 }]),
+		),
+	},
 };
 
 const storage = await openNodeSqliteStorage(DB_PATH);

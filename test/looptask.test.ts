@@ -36,6 +36,16 @@ let conversationExists: boolean;
 let directives: Directive[];
 let sleeps: { until: number; checkpoint: Record<string, unknown> }[];
 let failNextCommit: boolean;
+/** Tasks `inspect()` reports; a busy session has one that is not a background task. */
+let busyTasks: { record: { background: boolean; conversationId: number } }[];
+/** The conversation's recent entries, newest first, as `entries()` returns them. */
+let recentEntries: { kind: string }[];
+let resets: string[];
+let entriesCalls: number;
+/** What the fake conversation was asked to do, in order. */
+let order: string[];
+/** What a reset does to the session's measured cost (a reset itself can cost a little). */
+let resetAddsCost: number;
 
 const cost = (total: number) => ({ models: { m: { cost: { total } } }, tools: {} });
 const context = {} as never;
@@ -82,15 +92,33 @@ beforeEach(() => {
 	directives = [];
 	sleeps = [];
 	failNextCommit = false;
+	busyTasks = [];
+	recentEntries = [];
+	resets = [];
+	entriesCalls = 0;
+	order = [];
+	resetAddsCost = 0;
 	writeFileSync(AUDIT, "");
+	writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), "{}");
 	gh.script([]);
 	let next = 100;
 	ext.setHarness({
+		inspect: async () => ({ tasks: busyTasks }),
 		commit: async (callback: (tx: unknown) => unknown) => callback({ submissionByRequest: async (conversation: number, requestId: string) => submissions.get(`${conversation}:${requestId}`) }),
 		conversation: async (id: number) =>
 			conversationExists
 				? {
+						entries: async () => {
+							entriesCalls++;
+							return { items: recentEntries };
+						},
+						reset: async (handoff: string) => {
+							order.push("reset");
+							resets.push(handoff);
+							usage[1] = cost(((usage[1] as { models: { m: { cost: { total: number } } } })?.models?.m?.cost?.total ?? 0) + resetAddsCost);
+						},
 						submit: async (input: { requestId: string; content: string; entry: { kind: string; data: Record<string, unknown> } }) => {
+							order.push("submit");
 							submits.push({ requestId: input.requestId, content: input.content, entry: input.entry });
 							const key = `${id}:${input.requestId}`;
 							if (!submissions.has(key)) submissions.set(key, { id: next++ });
@@ -618,6 +646,233 @@ describe("await phase", () => {
 		sent();
 		await wait({ phase: "await", iteration: 3 });
 		assert.deepEqual(directives, [{ status: "terminal", outcome: { status: "completed", result: { iterations: 3 } } }]);
+	});
+});
+
+const entry = (kind: string) => ({ kind });
+const setPolicy = (loops: Record<string, unknown>) => writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops }));
+
+describe("mayResetForLoop", () => {
+	const may = (...kinds: string[]) => ext.mayResetForLoop(kinds.map(entry));
+
+	it("is true for a conversation nobody has spoken in", () => {
+		assert.equal(may(), true);
+		assert.equal(may("pi.assistant", "pi.tool-result", "pi.system"), true, "only the agent's own entries");
+	});
+
+	it("is true when the newest input is the loop's own tick", () => {
+		assert.equal(may("pi.assistant", "pi.tool-result", "pdl.loop-tick"), true);
+		assert.equal(may("pdl.loop-tick", "pi.user"), true, "a person's older message does not matter");
+		assert.equal(may("pdl.loop-tick", "pdl.peer"), true, "nor does an older peer message");
+	});
+
+	it("is false when a person has written since the last tick", () => {
+		assert.equal(may("pi.assistant", "pi.user", "pi.assistant", "pdl.loop-tick"), false);
+		assert.equal(may("pi.user"), false, "even with no tick at all");
+	});
+
+	it("is false when another session has written since the last tick", () => {
+		assert.equal(may("pi.assistant", "pdl.peer", "pdl.loop-tick"), false);
+		assert.equal(may("pdl.peer"), false);
+	});
+
+	it("uses the newest input, whatever came before it", () => {
+		assert.equal(may("pdl.loop-tick", "pi.user", "pdl.loop-tick"), true);
+		assert.equal(may("pi.user", "pdl.loop-tick", "pi.user"), false);
+	});
+
+	it("ignores entries that are not inputs", () => {
+		assert.equal(may("pi.compaction", "pi.reset", "pdl.other", "pdl.loop-tick"), true);
+	});
+
+	// The loop looks at the newest 50 entries. A person who asked for a long task (30 tool calls is 60 entries) has
+	// their message pushed out of that window, so "no input found" is not the same as "nobody has spoken".
+	it("does not reset when a full window of the agent's own entries hides who spoke last", () => {
+		assert.equal(may(...Array.from({ length: 50 }, () => "pi.assistant")), false);
+	});
+});
+
+describe("loopHandoff", () => {
+	const loop = baseLoop({ goal: "Improve the thing", note: "Opened #56; waiting on CI." });
+
+	it("says the history was cleared and where durable state lives", () => {
+		const text = ext.loopHandoff(loop, []);
+		assert.match(text, /^Fresh context for loop L1; earlier iterations' history was cleared to save cost\./);
+		assert.match(text, /project memory \(memory_search\), git, and GitHub/);
+	});
+
+	it("carries the goal, the last note and the open PRs", () => {
+		const text = ext.loopHandoff(loop, [3, 5]);
+		assert.match(text, /^Goal: Improve the thing$/m);
+		assert.match(text, /^Last iteration's note: Opened #56; waiting on CI\.$/m);
+		assert.match(text, /^Your open PRs: #3, #5$/m);
+	});
+
+	it("says so when there are no open PRs, and leaves out an empty note", () => {
+		const text = ext.loopHandoff(baseLoop({ note: "" }), []);
+		assert.match(text, /^You have no open PRs\.$/m);
+		assert.doesNotMatch(text, /Last iteration's note/);
+	});
+
+	it("caps a long goal at 600 characters", () => {
+		const text = ext.loopHandoff(baseLoop({ goal: "g".repeat(2_000) }), []);
+		const goal = text.split("\n").find((line) => line.startsWith("Goal: "))!;
+		assert.equal(goal.length, "Goal: ".length + 600 + 1);
+		assert.ok(goal.endsWith("\u2026"));
+		assert.equal(ext.loopHandoff(baseLoop({ goal: "g".repeat(600) }), []).includes("\u2026"), false, "exactly 600 is kept whole");
+	});
+
+	it("is short: it exists to save tokens", () => {
+		assert.ok(ext.loopHandoff(baseLoop({ goal: "g".repeat(5_000), note: "n".repeat(300) }), [1, 2, 3, 4, 5]).length < 1_300);
+	});
+});
+
+describe("fresh context per iteration", () => {
+	const run = (checkpoint: Record<string, unknown> = { phase: "run", iteration: 0 }) => phases.run(task(checkpoint), runtime(), context);
+	const iterationAudit = () => events().filter((event) => event.event === "loop_fresh_context");
+
+	it("resets a quiet loop's conversation with the handoff, before the prompt is sent", async () => {
+		setup({ loop: { note: "Opened #56." }, remote: null });
+		await run();
+		assert.equal(resets.length, 1);
+		assert.deepEqual(order, ["reset", "submit"]);
+		assert.match(resets[0]!, /^Fresh context for loop L1/);
+		assert.match(resets[0]!, /Goal: Improve the thing/);
+		assert.match(resets[0]!, /Last iteration's note: Opened #56\./);
+		assert.deepEqual(iterationAudit().map((event) => [event.loop, event.iteration]), [["L1", 0]]);
+	});
+
+	it("includes the PRs the gate found open", async () => {
+		setup({ remote: REMOTE });
+		gate({ prs: [{ number: 3, sha: "c".repeat(40), check: "failure" }, { number: 5, sha: "d".repeat(40), check: "success" }] });
+		await run();
+		assert.match(resets[0]!, /Your open PRs: #3, #5/);
+	});
+
+	it("says there are none when the session has no GitHub repo to ask", async () => {
+		setup({ remote: null });
+		await run();
+		assert.match(resets[0]!, /You have no open PRs\./);
+	});
+
+	it("resets when the newest input is the loop's own previous tick", async () => {
+		setup({ remote: null });
+		recentEntries = [entry("pi.assistant"), entry("pi.tool-result"), entry("pdl.loop-tick"), entry("pi.user")];
+		await run();
+		assert.equal(resets.length, 1);
+	});
+
+	it("does not reset after a person has written since the last tick, and still runs the iteration", async () => {
+		setup({ remote: null });
+		recentEntries = [entry("pi.assistant"), entry("pi.user"), entry("pi.assistant"), entry("pdl.loop-tick")];
+		await run();
+		assert.equal(resets.length, 0);
+		assert.deepEqual(order, ["submit"]);
+		assert.equal(iterationAudit().length, 0);
+	});
+
+	it("does not reset after another session has written since the last tick", async () => {
+		setup({ remote: null });
+		recentEntries = [entry("pdl.peer"), entry("pdl.loop-tick")];
+		await run();
+		assert.equal(resets.length, 0);
+		assert.equal(submits.length, 1);
+	});
+
+	it("does not reset while the session is busy with a run that is not a background task", async () => {
+		setup({ remote: null });
+		busyTasks = [{ record: { background: false, conversationId: 1 } }];
+		await run();
+		assert.equal(resets.length, 0);
+		assert.equal(submits.length, 1);
+	});
+
+	it("is not stopped by background tasks, such as the loop's own, or by another session's run", async () => {
+		setup({ remote: null });
+		busyTasks = [{ record: { background: true, conversationId: 1 } }, { record: { background: false, conversationId: 2 } }];
+		await run();
+		assert.equal(resets.length, 1);
+	});
+
+	it("does not reset when freshContext is turned off", async () => {
+		setPolicy({ freshContext: false });
+		setup({ remote: null });
+		await run();
+		assert.equal(resets.length, 0);
+		assert.equal(entriesCalls, 0, "it does not even look");
+		assert.equal(submits.length, 1);
+	});
+
+	it("resets by default, without any policy setting", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), "{}");
+		setup({ remote: null });
+		await run();
+		assert.equal(resets.length, 1);
+	});
+
+	it("never resets for an iteration that was already submitted", async () => {
+		setup({ remote: null });
+		submissions.set("1:loop:L1:0", { id: 7 });
+		await run();
+		assert.equal(resets.length, 0);
+		assert.equal(entriesCalls, 0);
+		assert.equal(submits.length, 0);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0 } }]);
+	});
+
+	it("does not reset a second time when a crash makes the phase run again", async () => {
+		setup({ remote: null });
+		failNextCommit = true;
+		await assert.rejects(run(), /process died/);
+		assert.equal(resets.length, 1);
+		await run();
+		assert.equal(resets.length, 1, "the iteration was already submitted, so the rerun reattaches");
+		assert.equal(submits.length, 1);
+	});
+
+	it("does not reset for an iteration the gate skips", async () => {
+		setup({ remote: REMOTE });
+		gate({ prs: [{ number: 3, sha: "c".repeat(40), check: "in_progress" }] });
+		await run();
+		assert.equal(resets.length, 0);
+		assert.equal(submits.length, 0);
+	});
+
+	it("does not reset a loop that is out of budget, over its cap, or has no session or conversation", async () => {
+		setup({ loop: { spent: 9 }, remote: null });
+		await run();
+		store = makeStore();
+		setup({ loop: { iteration: 5, maxIterations: 5 }, remote: null });
+		await run({ phase: "run", iteration: 5 });
+		store = makeStore();
+		setup({ session: false });
+		await run();
+		store = makeStore();
+		setup({ remote: null });
+		conversationExists = false;
+		await run();
+		assert.equal(resets.length, 0);
+	});
+
+	it("measures the iteration's starting cost after the reset, so the reset itself is not charged to the loop", async () => {
+		setup({ remote: null });
+		usage[1] = cost(5);
+		resetAddsCost = 0.7;
+		await run();
+		assert.equal((directives[0]!.checkpoint as { costBefore: number }).costBefore, 5.7);
+	});
+
+	it("resets again at the next iteration, each time from the loop's own latest note", async () => {
+		setup({ loop: { note: "first note" }, remote: null });
+		await run();
+		await phases.await(task({ phase: "await", iteration: 0, costBefore: 0 }), runtime(), context);
+		loopDoc()!.note = "second note";
+		recentEntries = [entry("pi.assistant"), entry("pdl.loop-tick")];
+		await run({ phase: "run", iteration: 1 });
+		assert.equal(resets.length, 2);
+		assert.match(resets[0]!, /first note/);
+		assert.match(resets[1]!, /second note/);
+		assert.deepEqual(order, ["reset", "submit", "reset", "submit"]);
 	});
 });
 

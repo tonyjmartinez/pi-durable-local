@@ -44,6 +44,10 @@ export type Policy = {
 		mergeMethod: "squash" | "merge" | "rebase";
 	};
 	loops: {
+		/** Start every loop iteration from a short handoff instead of the whole history (the main cost saver). */
+		freshContext: boolean;
+		/** Cap on all loops' spend together in any 24 hours, in USD; loops wait for room when it is reached. 0 = no cap. */
+		dailyBudgetUsd: number;
 		/** Hard cap on spend per loop, in USD; the loop pauses when crossed. */
 		defaultBudgetUsd: number;
 		defaultIntervalMinutes: number;
@@ -54,7 +58,7 @@ export type Policy = {
 export const DEFAULT_POLICY: Policy = {
 	model: "anthropic/claude-sonnet-5-5",
 	reviewModel: "anthropic/claude-opus-5-5",
-	searchModel: "anthropic/claude-opus-5-5",
+	searchModel: "anthropic/claude-haiku-5-5",
 	subagentModel: "anthropic/claude-haiku-5-5",
 	planModel: "anthropic/claude-sonnet-5-5",
 	deepModel: "anthropic/claude-opus-5-5",
@@ -110,7 +114,7 @@ export const DEFAULT_POLICY: Policy = {
 		requireChecks: true,
 		mergeMethod: "squash",
 	},
-	loops: { defaultBudgetUsd: 5, defaultIntervalMinutes: 60, defaultMaxIterations: 24 },
+	loops: { freshContext: true, dailyBudgetUsd: 10, defaultBudgetUsd: 5, defaultIntervalMinutes: 60, defaultMaxIterations: 24 },
 };
 
 export function ensureDirs(): void {

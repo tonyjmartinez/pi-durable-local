@@ -7,6 +7,8 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { makeFakeGh, makeStore } from "./fakegh.helper.ts";
 import { APPROVE, fakeModels, REJECT, run, shipScript, usageOf } from "./shipfixtures.helper.ts";
 
@@ -252,7 +254,8 @@ describe("web_search reports what the search cost", () => {
 	const search = ext.Web_.tools!.find((entry) => entry.name === "web_search")!;
 	const execute = search.execute as (args: { query: string; allowedDomains?: string[] }, api: unknown, context: unknown) => Promise<Result>;
 	const withModels = (models: unknown) => ({ models });
-	const catalog = fakeModels([]);
+	// The default search model is Haiku. Round rates keep the arithmetic exact: $1/M in, $5/M out, $0.10/M cache read, $1.25/M cache write.
+	const catalog = { getModels: () => [{ provider: "anthropic", id: "claude-haiku-5-5", cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 } }] };
 
 	const message = (options: { text?: string; citations?: { url: string; title: string }[]; results?: { url: string; title: string }[]; stop?: string; usage?: Record<string, unknown> } = {}) => ({
 		id: "msg_1", type: "message", role: "assistant", model: "claude-opus-5-5", stop_sequence: null,
@@ -302,7 +305,7 @@ describe("web_search reports what the search cost", () => {
 		const { headers, body } = requests[0]!;
 		// Newer SDKs send the key as a bearer token, older ones as x-api-key; either way it is the configured key.
 		assert.ok(headers.authorization === "Bearer test-key" || headers["x-api-key"] === "test-key", JSON.stringify(Object.keys(headers)));
-		assert.equal(body.model, "claude-opus-5-5");
+		assert.equal(body.model, "claude-haiku-5-5");
 		assert.equal(body.tools[0].type, "web_search_20260209");
 		assert.equal(body.tools[0].max_uses, 5);
 		assert.match(body.messages[0].content, /ponytail palm height/);
@@ -333,12 +336,23 @@ describe("web_search reports what the search cost", () => {
 			replies = [{ body: message({ usage: { input_tokens: 10_000, output_tokens: 1_000, cache_read_input_tokens: 20_000, cache_creation_input_tokens: 8_000, server_tool_use: { web_search_requests: 3 } } }) }];
 			const { usage } = await execute({ query: "q" }, withModels(catalog), context);
 			assert.deepEqual([usage!.input, usage!.output, usage!.cacheRead, usage!.cacheWrite], [10_000, 1_000, 20_000, 8_000]);
-			// $5/M in, $25/M out, $0.50/M cache read, $6.25/M cache write, and $0.01 for each of 3 searches.
-			close(usage!.cost.input, 0.05);
-			close(usage!.cost.output, 0.025);
-			close(usage!.cost.cacheRead, 0.01);
-			close(usage!.cost.cacheWrite, 0.05);
-			close(usage!.cost.total, 0.05 + 0.025 + 0.01 + 0.05 + 0.03);
+			// $1/M in, $5/M out, $0.10/M cache read, $1.25/M cache write, and $0.01 for each of 3 searches.
+			close(usage!.cost.input, 0.01);
+			close(usage!.cost.output, 0.005);
+			close(usage!.cost.cacheRead, 0.002);
+			close(usage!.cost.cacheWrite, 0.01);
+			close(usage!.cost.total, 0.01 + 0.005 + 0.002 + 0.01 + 0.03);
+		});
+
+		it("costs about a cent for a typical search with the real catalog and the default model", async () => {
+			const real = createModels({});
+			real.setProvider(anthropicProvider());
+			// The measured shape of one Haiku search: about 24.8k tokens in, a short answer out, one search.
+			replies = [{ body: message({ usage: { input_tokens: 24_800, output_tokens: 400, server_tool_use: { web_search_requests: 1 } } }) }];
+			const { usage } = await execute({ query: "q" }, withModels(real), context);
+			assert.ok(usage!.cost.total > 0.011 && usage!.cost.total < 0.016, `a typical search costs ${usage!.cost.total}`);
+			close(usage!.cost.total - 0.01, usage!.cost.input + usage!.cost.output);
+			assert.ok(usage!.cost.input < 0.003, "the tokens cost well under half a cent; the fee is most of it");
 		});
 
 		it("charges the search fee even when the model's prices are unknown", async () => {
@@ -356,9 +370,9 @@ describe("web_search reports what the search cost", () => {
 
 		it("charges nothing for a search the server did not run", async () => {
 			replies = [{ body: message({ usage: { server_tool_use: { web_search_requests: 0 } } }) }];
-			close((await execute({ query: "q" }, withModels(catalog), context)).usage!.cost.total, 0.05 + 0.025);
+			close((await execute({ query: "q" }, withModels(catalog), context)).usage!.cost.total, 0.01 + 0.005);
 			replies = [{ body: message({ usage: { server_tool_use: undefined } }) }];
-			close((await execute({ query: "q" }, withModels(catalog), context)).usage!.cost.total, 0.05 + 0.025);
+			close((await execute({ query: "q" }, withModels(catalog), context)).usage!.cost.total, 0.01 + 0.005);
 		});
 
 		it("adds up the turns of a search that paused and was continued", async () => {
@@ -371,7 +385,7 @@ describe("web_search reports what the search cost", () => {
 			assert.deepEqual(requests[1]!.body.messages.map((m: { role: string }) => m.role), ["user", "assistant"]);
 			assert.match(result.output[0]!.text, /^First part\. Second part\./);
 			assert.deepEqual([result.usage!.input, result.usage!.output], [3_000, 400]);
-			close(result.usage!.cost.total, (5 / 1e6) * 3_000 + (25 / 1e6) * 400 + 3 * 0.01);
+			close(result.usage!.cost.total, (1 / 1e6) * 3_000 + (5 / 1e6) * 400 + 3 * 0.01);
 		});
 
 		it("gives up on a search that never stops pausing, after three requests", async () => {
