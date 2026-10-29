@@ -22,7 +22,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
-import { dryRunGates, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, Sessions_, setHarness, Web_ } from "./extensions.ts";
+import { dryRunGates, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
 import { audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -41,7 +41,7 @@ models.setProvider(anthropicProvider());
 
 const registry = createRegistry();
 // Guard first, so its hook sees every call before anything else can act on it.
-for (const extension of [Guard_, createCodingTools(), SessionContext, Memory_, Sessions_, Web_, Git_, Loops_]) {
+for (const extension of [Guard_, createCodingTools(), SessionContext, Memory_, Sessions_, Web_, Git_, Loops_, Subagent_]) {
 	registry.install(extension);
 }
 
@@ -143,9 +143,7 @@ async function status() {
 	);
 	const rows = [];
 	for (const [name, info] of Object.entries(sessions)) {
-		const usage = await harness.snapshot(UsageDoc, info.conversationId as never, context);
-		let cost = 0;
-		for (const bucket of [usage?.models ?? {}, usage?.tools ?? {}]) for (const u of Object.values(bucket)) cost += (u as { cost?: { total?: number } }).cost?.total ?? 0;
+		const cost = await sessionCost(harness, name, info.conversationId, context);
 		const conversation = await harness.conversation(info.conversationId as never, context);
 		const agent = conversation === undefined ? undefined : await conversation.agent(context);
 		rows.push({ name, cwd: info.cwd, purpose: info.purpose, busy: busy.has(info.conversationId), cost, model: agent?.model === undefined ? undefined : `${agent.model.provider}/${agent.model.modelId}` });

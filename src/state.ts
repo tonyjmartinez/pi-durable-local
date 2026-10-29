@@ -70,9 +70,19 @@ export const Loops = defineDoc<{ byId: Record<string, Loop>; nextId: number }>({
 	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
 });
 
-export function sessionNameOf(byName: Record<string, SessionInfo>, conversationId: number): string | undefined {
+/** Subagent conversations, by conversation ID, mapped to the session that spawned them. */
+export const Subagents = defineDoc<{ parentOf: Record<string, string> }>({
+	kind: "pdl.subagents",
+	version: 1,
+	scope: "session",
+	initial: () => ({ parentOf: {} }),
+	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
+});
+
+export function sessionNameOf(byName: Record<string, SessionInfo>, conversationId: number, parentOf?: Record<string, string>): string | undefined {
 	for (const [name, info] of Object.entries(byName)) if (info.conversationId === conversationId) return name;
-	return undefined;
+	// A subagent acts within its parent session's directory and rules.
+	return parentOf?.[String(conversationId)];
 }
 
 /** Append-only record of every safety decision and merge, outside the database so it survives a reset. */

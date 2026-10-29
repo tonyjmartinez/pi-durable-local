@@ -8,6 +8,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { Context } from "@earendil-works/chord/context";
 import { type Models, Type } from "@earendil-works/pi-ai";
 import {
+	AssistantEntry,
+	configure,
 	defineExtension,
 	defineTask,
 	defineTool,
@@ -19,7 +21,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
-import { audit, type Loop, Loops, type Memory, Memories, type SessionInfo, sessionNameOf, Sessions } from "./state.ts";
+import { audit, type Loop, Loops, type Memory, Memories, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
 
 const run = promisify(execFile);
 
@@ -57,6 +59,7 @@ Working rules:
   One-way-door PRs are always left for Tony; pr_merge will not merge them.
 - A PR is merged only through \`pr_merge\`, which enforces CI, size, protected-path, and independent review gates. If it refuses, fix the cause or leave the PR for Tony; never try to work around a gate.
 - Record durable facts (decisions, conventions, gotchas, preferences Tony states) with \`memory_save\`; check \`memory_search\` before re-deriving something.
+- Delegate to save cost: hand focused, well-specified work (research, scoped implementation, tests, diagnosing a failing check) to the \`subagent\` tool, which runs a cheaper model in your sandbox. Keep planning, judgment and shipping yourself, and check its report before acting on it.
 - Coordinate with other sessions via \`sessions_list\` / \`session_send\` instead of editing the same repo at once.
 - If blocked on a decision that is Tony's to make, say so plainly and stop rather than guessing.`;
 
@@ -118,8 +121,9 @@ const MEMORY_PROMPT_BUDGET = 8_000;
 
 async function sessionCwd(api: { snapshot: Harness["snapshot"] }, conversationId: number, context: Context) {
 	const sessions = await api.snapshot(Sessions, context);
-	const name = sessions === undefined ? undefined : sessionNameOf(sessions.byName, conversationId);
-	return { name, cwd: name === undefined ? undefined : sessions!.byName[name]!.cwd };
+	const subagents = await api.snapshot(Subagents, context);
+	const name = sessions === undefined ? undefined : sessionNameOf(sessions.byName, conversationId, subagents?.parentOf);
+	return { name, cwd: name === undefined ? undefined : sessions!.byName[name]?.cwd };
 }
 
 export const Memory_ = defineExtension({
@@ -491,6 +495,7 @@ async function ensureMirror(session: string, info: SessionInfo, context: Context
 	return mirror;
 }
 
+/** Only the session itself, never a subagent: pushing, PRs and merges belong to the parent. */
 async function sessionInfo(api: { snapshot: Harness["snapshot"] }, conversationId: number, context: Context) {
 	const sessions = await api.snapshot(Sessions, context);
 	const name = sessions === undefined ? undefined : sessionNameOf(sessions.byName, conversationId);
@@ -819,6 +824,16 @@ function costOf(usage: { models: Record<string, unknown>; tools: Record<string, 
 	return total;
 }
 
+/** A session's spend including every subagent it spawned, so loop budgets cover delegated work too. */
+export async function sessionCost(reader: { snapshot: Harness["snapshot"] }, session: string, conversationId: number, context: Context): Promise<number> {
+	let total = costOf(await reader.snapshot(UsageDoc, conversationId as never, context));
+	const subagents = await reader.snapshot(Subagents, context);
+	for (const [child, parent] of Object.entries(subagents?.parentOf ?? {})) {
+		if (parent === session) total += costOf(await reader.snapshot(UsageDoc, Number(child) as never, context));
+	}
+	return total;
+}
+
 export function loopPrompt(loop: Loop, policy: Policy): string {
 	return `[loop ${loop.id}, iteration ${loop.iteration + 1}/${loop.maxIterations}]
 Ongoing goal: ${loop.goal}
@@ -859,8 +874,7 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				}, context);
 			if (loop === undefined || loop.status !== "active") return stop("done", loop?.note ?? "");
 			if (session === undefined) return stop("failed", `session ${loop.session} no longer exists`);
-			const usage = await runtime.snapshot(UsageDoc, session.conversationId as never, context);
-			const spent = costOf(usage) - loop.costAtStart;
+			const spent = (await sessionCost(runtime, loop.session, session.conversationId, context)) - loop.costAtStart;
 			if (spent >= loop.budgetUsd) return stop("paused", `budget reached: $${spent.toFixed(2)} of $${loop.budgetUsd}`);
 			if (loop.iteration >= loop.maxIterations) return stop("done", `reached ${loop.maxIterations} iterations`);
 
@@ -924,6 +938,64 @@ export const Loops_ = defineExtension({
 				if (updated === undefined) return fail(`No loop ${args.loopId}`);
 				audit("loop_report", { loop: args.loopId, status: args.status, note: args.note });
 				return { ...text(`Loop ${args.loopId}: ${updated.status} — ${args.note}`), control: { terminate: true } };
+			},
+		}),
+	],
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Subagents: a session delegates focused work to a cheaper model in a child conversation it owns.
+
+const SUBAGENT_BRIEF = `You are a subagent: a focused worker spawned by a pi-durable session to do one task in its repo.
+- Do exactly the task you were given, in the current directory, then answer with a concise report: what you did, what you found, which files changed, and the exact commands you ran to verify.
+- You cannot push, open or merge PRs, or message other sessions; your parent session does that. Commit locally only if the task says to.
+- Same sandbox and safety rules as your parent. If the task is ambiguous or blocked, say so in your report instead of guessing.`;
+
+export const Subagent_: ReturnType<typeof defineExtension> = defineExtension({
+	name: "pdl.subagent",
+	tools: [
+		defineTool({
+			name: "subagent",
+			description:
+				"Delegate one focused, self-contained task (research, a scoped implementation, writing tests, reviewing a diff, running and diagnosing checks) to a cheaper subagent model that works in your directory with the same sandbox. It returns its report. Give it everything it needs: the goal, the relevant files, constraints, and how to verify. Use it to save cost on mechanical or exploratory work; keep planning, judgment, and shipping (git_push, pr_create, pr_merge) yourself.",
+			parameters: Type.Object({
+				task: Type.String({ description: "The complete brief: goal, context, files, constraints, verification" }),
+			}),
+			// A rerun after a crash finds the same child and the same submission instead of starting over.
+			replay: "safe",
+			execute: async (args, api, context) => {
+				const policy = loadPolicy();
+				const { name } = await sessionCwd(api, api.conversationId, context);
+				if (name === undefined) return fail("Subagents are only available inside a named session.");
+				const ref = splitModel(policy.subagentModel);
+				const child = await api.commit(async (tx) => {
+					const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
+					if (existing !== undefined) return existing.id;
+					// Starts as a copy of this conversation's agent (cwd, tools); then a cheaper model and no shipping tools.
+					const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
+					await configure(tx, created.id, {
+						model: ref,
+						thinkingLevel: "low",
+						extensions: { remove: [Subagent_, Git_, Sessions_, Loops_] },
+						instructions: SUBAGENT_BRIEF,
+					});
+					(await tx.doc(Subagents)).parentOf[String(created.id)] = name;
+					return created.id;
+				}, context);
+				await api.details({ conversationId: child }, context);
+				audit("subagent", { session: name, child, model: policy.subagentModel, task: args.task.slice(0, 300) });
+				const handle = await api.conversation(child, context);
+				if (handle === undefined) return fail("Subagent conversation vanished.");
+				const settled = await (await handle.submit({ type: "input", content: args.task, requestId: `subagent:${api.taskId}` }, context)).wait(context);
+				if (settled.status !== "done") return fail(`Subagent ended ${settled.status}.`);
+				const answer = await harness().conversation(child, context);
+				const page = await answer!.entries({}, 20, undefined, context);
+				const last = page.items.find((entry) => AssistantEntry.is(entry));
+				const report = (last?.model?.[0]?.content as { type: string; text?: string }[] | undefined)
+					?.map((part) => (part.type === "text" ? part.text : ""))
+					.join("")
+					.trim();
+				return text(`Subagent (${policy.subagentModel}) report:\n${report || "(no text answer)"}`);
 			},
 		}),
 	],
