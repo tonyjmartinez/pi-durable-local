@@ -41,12 +41,12 @@ Only `ANTHROPIC_API_KEY` is required. Web search uses Anthropic's server-side se
 
 Why not systemd: on WSL, WSLg mounts its own tmpfs over `/run/user/$UID`, which hides the systemd user bus, so `systemctl --user` cannot connect. `bin/pdd-up` is a small supervisor instead: it runs the daemon in its own process group and restarts it 5 seconds after any exit. `pd` also starts it on demand when the socket is missing. A unit file is kept in `systemd/` for machines where the user bus works; its Node path is specific to the author's machine, so edit it before use.
 
-`pd doctor` checks: the API key, the policy file, the supervisor, login autostart, the socket, the store, that the agent sandbox really hides `~/.ssh` and makes `$HOME` read-only, `gh` login, and the auto-merge allowlist.
+`pd doctor` checks: the API key, the policy file, the supervisor, login autostart, the socket, the store, that the agent sandbox really hides `~/.ssh` and makes `$HOME` read-only, `gh` login, whether phone notifications are configured (`PD_NOTIFY_URL`, with the setup steps if not), and the auto-merge allowlist.
 
 ## Daily use
 
 ```
-pd factory <owner/repo> ["goal"] [--base main] [--every 60] [--max 24] [--budget 5] [--name n]
+pd factory <owner/repo> ["goal"] [--base main] [--merge] [--every 60] [--max 24] [--budget 5] [--name n]
                                           clone, create a session, and (with a goal) start a loop
 pd status                                 sessions, loops, spend, parked tasks
 pd new <name> --cwd <dir> [--purpose "..."] [--model provider/id]
@@ -74,7 +74,7 @@ pd doctor                                 check setup
 
 `pd` with no arguments is `pd status`. Session names are letters, digits, `.`, `_`, `-` (max 41 characters). Without `--cwd`, `pd new` uses your current directory.
 
-`pd factory owner/repo` is the quick path to a working project: it clones `git@github.com:owner/repo.git` into the first writable root (`~/proj/<repo>` by default) with git hooks disabled, creates a session named after the repo, and, if you pass a goal, starts a loop. `--base` records the branch PRs should target in the policy when the GitHub default is not the deploy branch. It does not add the repo to the auto-merge allowlist; do that yourself (see Policy).
+`pd factory owner/repo` is the quick path to a working project: it clones `git@github.com:owner/repo.git` into the first writable root (`~/proj/<repo>` by default) with git hooks disabled, creates a session named after the repo, and, if you pass a goal, starts a loop. `--base` records the branch PRs should target in the policy when the GitHub default is not the deploy branch. `--merge` adds the repo to `automerge.repos`, which allows gated merges there; the command you typed is the approval, and it is audited as `automerge_enabled`. Without `--merge`, PRs in the repo park as `no-merge-authority` until you add it yourself (see Policy).
 
 Inside `pd attach`, plain text is sent as a message (queued if the agent is busy). Slash commands:
 
@@ -123,15 +123,17 @@ Agents never hold GitHub credentials. They commit locally and call tools that th
 2. Draft: `mark-ready`. Conflicts: `resolve-conflicts`. Behind its base: `update-branch`.
 3. A failing or cancelled check: `fix-ci`. A pending check: `wait-ci`.
 4. No passing check at all (with `requireChecks`): `park-human`.
-5. A reviewer requested changes, or the independent review rejected this head: `address-review`.
+5. A reviewer requested changes, there are unresolved review threads (read by the daemon through a read-only GraphQL query), or the independent review rejected this head: `address-review`.
 6. Unless a human approved this head: a one-way door, any reason in the PR's "needs a human" list, or a high risk tier: `park-human`.
 7. The repo is not in `automerge.repos`, or the head branch lacks the prefix: `no-merge-authority`.
 8. No review of this head and description yet: the daemon runs the independent review itself, then decides again.
 9. Otherwise: merge.
 
+A PR that would park for a human, and has at least one passing check, is reviewed too, so the review result is attached when it parks.
+
 The reasons that always park a PR for a human are: it comes from a fork; its author is not the daemon's own GitHub account; it does not target the deploy branch; it changes more than `maxChangedFiles` files or `maxChangedLines` lines; it touches a protected path (checked on both sides of a rename); its description is missing template fields; its Testing section says nothing was run; or it declares no Door, which counts as one-way.
 
-**Risk tiers.** The diff earns a floor: high for a protected path or more than 400 changed lines; medium for more than 100 lines, a test changed alongside the code it tests, or a config file changed; otherwise low. The agent's declared Risk can only raise it. Low and medium PRs may auto-merge; high always waits for you. Every PR that reaches the merge step gets the independent review, including a high-risk one you approved; a PR that parks first is not reviewed until then.
+**Risk tiers.** The diff earns a floor: high for a protected path or more than 400 changed lines; medium for more than 100 lines, a test changed alongside the code it tests, or a config file changed; otherwise low. The agent's declared Risk can only raise it. Low and medium PRs may auto-merge; high always waits for you. Every PR gets the independent review, including one that parks for a human: if it would park and CI has at least one passing check, the daemon reviews it first, so you see the verdict with the park.
 
 **CI.** Only GitHub Actions check runs on the exact head commit count as a pass. Commit statuses and check runs from other apps can block a PR but never pass it, because anyone with a token can post one.
 
@@ -139,7 +141,7 @@ The reasons that always park a PR for a human are: it comes from a fork; its aut
 
 **The merge.** A squash merge (or the configured method) pinned to the head commit that was checked (`--match-head-commit`), with the branch deleted. If the branch moved after the check, the merge fails and the next tick starts over.
 
-**Parking and approving.** When a PR parks for a human, the daemon records it in the audit log, sends a notification, and (for `park-human`) comments on the PR with the reasons. To approve it, read the PR and run `pd approve owner/repo 54`. The approval is pinned to the head SHA you saw, so a later push needs a new one. Approval lifts the human-only limits (risk tier, one-way door, the needs-a-human reasons); it never skips CI, the review, or merge authority.
+**Parking and approving.** When a PR parks, the daemon records it in the audit log and sends a notification, and (for `park-human`) comments on the PR with the reasons and the review verdict. This happens once per head commit and description: a record of parked PRs (keyed like the review cache) stops repeat notifications and comments while the PR sits unchanged, and a push or an edit parks it afresh. To approve it, read the PR and run `pd approve owner/repo 54`. The approval is pinned to the head SHA you saw, so a later push needs a new one. Approval lifts the human-only limits (risk tier, one-way door, the needs-a-human reasons); it never skips CI, the review, or merge authority.
 
 `pr_merge` is kept for older prompts and behaves exactly like `pr_tick`. To see what the ship loop would do to a real PR without merging, run `pd gates owner/repo 54`: it runs everything, including the AI review, even for a repo that is not allowlisted.
 
@@ -184,7 +186,7 @@ Presets are subject to the same merge gates as any other work. The weekly reaper
 
 When something costs an agent real time (a confusing tool, a missing script, a flaky check, a rule that blocked legitimate work), it calls `friction_file`. The issue has what happened, what was wanted, how to reproduce, the cost, what was already tried, and the relevant files, plus a priority from `P0` to `P3` and, when a human must decide, a `needs-decision` label. Agents search the open `friction` issues first and comment on a near-duplicate instead of filing a new one. Credentials in the text are redacted before anything leaves the machine.
 
-`scope: "project"` files on the session's own repo. `scope: "factory"` files on the factory's repo, set by `FACTORY_REPO` in `src/extensions.ts` (currently `tonyjmartinez/pi-durable-local`; change it if you fork this).
+`scope: "project"` files on the session's own repo. `scope: "factory"` files on the factory's own repo, taken from this checkout's `origin` remote, so a fork files on the fork (it falls back to `tonyjmartinez/pi-durable-local` if the remote cannot be read).
 
 Every six hours the daemon also sweeps its own audit log. A guard rule that blocked the same thing three or more times in 24 hours, across sessions, becomes a friction issue on the factory repo marked `needs-decision`, since the rules are yours to change. A `friction-sweep` loop then picks up the rest.
 
@@ -229,13 +231,12 @@ The allowlist is empty by default, which means nothing auto-merges anywhere: PRs
 | `automerge.maxChangedFiles` | `25` | Changed files; over it, the PR parks |
 | `automerge.protectedPaths` | see below | Globs no automated PR may touch |
 | `automerge.requireChecks` | `true` | Need at least one passing GitHub Actions check |
-| `automerge.requireAiReview` | `true` | Not read by the ship loop, which always runs the review; kept for compatibility |
 | `automerge.mergeMethod` | `squash` | `squash`, `merge`, or `rebase` |
 | `loops.defaultBudgetUsd` | `5` | Per-loop spend cap |
 | `loops.defaultIntervalMinutes` | `60` | Time between iterations |
 | `loops.defaultMaxIterations` | `24` | Iteration cap |
 
-Default `protectedPaths`: CI config (`.github`, GitLab, CircleCI), env and key files, `secrets` and `migrations` directories, Dockerfiles, Terraform, every `package.json` and lockfile, Makefiles, test-runner configs, git hooks, `wrangler.*`, `CODEOWNERS`, `.pi`, and `AGENTS.md`. The exact list is `DEFAULT_POLICY` in `src/config.ts`. In globs, `**` spans directories and `*` stays within one. Setting `protectedPaths` replaces the list, it does not extend it.
+Default `protectedPaths`: CI config (`.github`, GitLab, CircleCI), env and key files, `secrets` and `migrations` directories, Dockerfiles, Terraform, dependency manifests and lockfiles for Node (`package.json`, npm, pnpm, yarn and bun lockfiles), Rust (`Cargo.toml`, `Cargo.lock`), Go (`go.mod`, `go.sum`), Python (`requirements*.txt`, `pyproject.toml`, `poetry.lock`, `uv.lock`), Ruby (`Gemfile`, `Gemfile.lock`), PHP (`composer.json`) and JVM (`build.gradle*`, `pom.xml`), Makefiles, test-runner configs, git hooks, `wrangler.*`, `CODEOWNERS`, `.pi`, and `AGENTS.md`. The exact list is `DEFAULT_POLICY` in `src/config.ts`. In globs, `**` spans directories and `*` stays within one. Setting `protectedPaths` replaces the list, it does not extend it.
 
 `model`, `thinkingLevel`, and `writableRoots` apply to new sessions and to guard checks as they happen. Change a running session's model with `/model` in `pd attach`.
 

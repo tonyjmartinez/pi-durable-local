@@ -306,7 +306,7 @@ const HELP = `pd — pi-durable sessions that keep running
   pd mem rm <id>
 
   pd gates <owner/repo> <pr>                dry-run pr_tick (incl. AI review), never merges
-  pd approve <owner/repo> <pr>              approve a parked PR's current head (high risk / one-way / protected)
+  pd approve <owner/repo> <pr> <sha7>       approve a parked PR at the commit you reviewed (from the park comment)
   pd audit                                  safety decisions and merges
   pd retry <taskId>                         rerun a parked task
   pd doctor                                 check setup`;
@@ -431,7 +431,7 @@ async function main(argv: string[]): Promise<void> {
 			return;
 		}
 		case "approve": {
-			const result = await call("POST", "/approve", { repo: positional[0], number: Number(positional[1]) });
+			const result = await call("POST", "/approve", { repo: positional[0], number: Number(positional[1]), sha: positional[2] });
 			console.log(`approved ${result.repo}#${result.number} at ${String(result.sha).slice(0, 7)}; a later push needs a new approval`);
 			return;
 		}

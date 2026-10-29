@@ -113,7 +113,7 @@ export function notificationFor(event: string, data: Record<string, unknown>): N
 		case "merged":
 			return { type: "merged", title: `Merged ${pr}`, text: `tier ${String(data.tier ?? "?")} by ${String(data.session ?? "a session")}`, ...(url ? { url } : {}) };
 		case "parked":
-			return { type: "parked", title: `Needs you: ${pr}`, text: [String(data.reason ?? ""), ...((data.details as string[] | undefined) ?? [])].join("\n"), ...(url ? { url } : {}) };
+			return { type: "parked", title: `Needs you: ${pr}${data.sha ? ` @${String(data.sha)}` : ""}`, text: [String(data.reason ?? ""), ...((data.details as string[] | undefined) ?? [])].join("\n"), ...(url ? { url } : {}) };
 		case "loop_report":
 			return data.status === "blocked" ? { type: "loop_blocked", title: `Loop ${String(data.loop)} blocked`, text: String(data.note ?? "") } : undefined;
 		case "loop_budget":
@@ -149,5 +149,14 @@ export const Parked = defineDoc<{ byKey: Record<string, number> }>({
 	version: 1,
 	scope: "session",
 	initial: () => ({ byKey: {} }),
+	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
+});
+
+/** Work branches by `owner/repo:branch`: which session owns each, and when the daemon last pushed it. */
+export const Branches = defineDoc<{ byRef: Record<string, { session: string; pushedAt: number; sha: string }> }>({
+	kind: "pdl.branches",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byRef: {} }),
 	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
 });

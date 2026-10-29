@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { connect } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -32,6 +33,16 @@ const AGENT_SHELL = fileURLToPath(new URL("../bin/agent-shell", import.meta.url)
 const log = (...parts: unknown[]) => console.log(new Date().toISOString(), ...parts);
 
 ensureDirs();
+
+// One process owns the store. If a daemon already answers on the socket, leave before touching SQLite.
+await new Promise<void>((done) => {
+	const probe = connect(SOCKET_PATH);
+	probe.once("connect", () => {
+		console.error(`pdd is already running on ${SOCKET_PATH}; refusing to open the store twice`);
+		process.exit(1);
+	});
+	probe.once("error", () => done());
+});
 // Secrets reach the model providers through the daemon's own environment; agent shells get a scrubbed copy.
 const shellEnv = scrubbedEnv();
 for (const [name, value] of Object.entries(loadSecrets())) process.env[name] = value;
@@ -159,8 +170,9 @@ async function status() {
  */
 async function startProject(body: { repo?: string; name?: string; purpose?: string; goal?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number; baseBranch?: string; merge?: boolean }) {
 	const repo = String(body.repo ?? "");
-	if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new HttpError(400, "repo must be owner/name");
+	if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || repo.split("/").some((part) => part === "." || part === "..")) throw new HttpError(400, "repo must be owner/name");
 	const name = String(body.name ?? repo.split("/")[1]!.replace(/\.[a-z]+$/i, "")).toLowerCase();
+	if (!/^[a-z0-9][a-z0-9._-]{0,40}$/.test(name) || name.includes("..")) throw new HttpError(400, "invalid session name");
 	const root = loadPolicy().writableRoots[0]!.replace(/^~(?=\/|$)/, process.env.HOME!);
 	const dir = resolve(root, repo.split("/")[1]!);
 	if (!existsSync(dir)) {
@@ -199,9 +211,12 @@ async function startLoop(body: { session?: string; goal?: string; preset?: strin
 		body.intervalMinutes ??= CLEANUP_SCHEDULE[preset].intervalMinutes;
 	}
 	if (!body.goal) throw new HttpError(400, "goal is required");
-	const usage = await harness.snapshot(UsageDoc, conversation.id, context);
-	let costAtStart = 0;
-	for (const bucket of [usage?.models ?? {}, usage?.tools ?? {}]) for (const u of Object.values(bucket)) costAtStart += (u as { cost?: { total?: number } }).cost?.total ?? 0;
+	// The budget window starts at the session's spend including its subagents, the same measure the loop checks.
+	const costAtStart = await sessionCost(harness, String(body.session), conversation.id, context);
+	const clamp = (value: number | undefined, min: number, max: number) => (value === undefined || !Number.isFinite(value) ? undefined : Math.min(Math.max(value, min), max));
+	body.intervalMinutes = clamp(body.intervalMinutes, 5, 60 * 24 * 30);
+	body.maxIterations = clamp(body.maxIterations, 1, 1000);
+	body.budgetUsd = clamp(body.budgetUsd, 0.01, 1000);
 	return conversation.commit(async (tx) => {
 		const loops = await tx.doc(Loops);
 		const id = `L${loops.nextId++}`;
@@ -242,20 +257,41 @@ async function setLoopStatus(id: string, action: string) {
 			if (task !== undefined && task.state.status !== "terminal") await harness.abortTask(loop.taskId as never, context);
 		}
 	} else if (action === "resume") {
+		if (loop.status === "active") throw new HttpError(409, `loop ${id} is already active`);
 		const { conversation } = await sessionByName(loop.session);
+		// A loop paused by its own report may still have a live task waiting to notice; end it so only one runs.
+		if (loop.taskId !== undefined) {
+			const task = await harness.getTask(loop.taskId as never, context);
+			if (task !== undefined && task.state.status !== "terminal") {
+				await harness.abortTask(loop.taskId as never, context);
+				await harness.waitForTask(loop.taskId as never, context);
+			}
+		}
+		// A resumed loop gets a fresh budget window, measured the same way the loop measures spend.
+		const cost = await sessionCost(harness, loop.session, conversation.id, context);
 		await conversation.commit(async (tx) => {
 			const current = (await tx.doc(Loops)).byId[id]!;
 			Object.assign(current, { status: "active", note: "resumed", nextRunAt: Date.now() });
-			const usage = await tx.doc(UsageDoc, conversation.id);
-			// A resumed loop gets a fresh budget window.
-			let cost = 0;
-			for (const bucket of [usage.models, usage.tools]) for (const u of Object.values(bucket)) cost += (u as { cost?: { total?: number } }).cost?.total ?? 0;
 			current.costAtStart = cost;
 			current.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true });
 		}, context);
 	} else throw new HttpError(400, `unknown action ${action}`);
 	audit(`loop_${action}`, { loop: id });
 	return (await harness.snapshot(Loops, context))?.byId[id];
+}
+
+/** The last `count` audit entries, reading only the end of the file and skipping torn lines. */
+function auditTail(count: number): unknown[] {
+	const size = statSync(AUDIT_LOG).size;
+	const start = Math.max(0, size - 512 * 1024);
+	const text = readFileSync(AUDIT_LOG).subarray(start).toString("utf8");
+	return text.split("\n").slice(start > 0 ? 1 : 0).filter(Boolean).slice(-count).flatMap((line) => {
+		try {
+			return [JSON.parse(line)];
+		} catch {
+			return [];
+		}
+	});
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -265,7 +301,11 @@ async function readBody(request: IncomingMessage): Promise<Record<string, unknow
 	const chunks: Buffer[] = [];
 	for await (const chunk of request) chunks.push(chunk as Buffer);
 	if (chunks.length === 0) return {};
-	return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+	try {
+		return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+	} catch {
+		throw new HttpError(400, "body must be JSON");
+	}
 }
 
 function send(response: ServerResponse, status: number, body: unknown): void {
@@ -372,7 +412,11 @@ const routes: [string, RegExp, Route][] = [
 	["POST", /^\/approve$/, async (_m, body) => {
 		const repo = String(body.repo);
 		const number = Number(body.number);
+		const expected = String(body.sha ?? "").toLowerCase();
+		if (!/^[0-9a-f]{7,40}$/.test(expected)) throw new HttpError(400, "pass the commit you reviewed: pd approve <repo> <pr> <sha7> (shown in the park comment)");
 		const sha = (await run("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"])).stdout.trim();
+		// The approval binds the commit Tony saw; if the agent pushed since, he must look again.
+		if (!sha.startsWith(expected)) throw new HttpError(409, `PR head is now ${sha.slice(0, 7)}, not ${expected}; review the new commit first`);
 		await harness.commit(async (tx) => {
 			(await tx.doc(Approvals)).byPr[`${repo}#${number}`] = { sha, at: Date.now() };
 		}, context);
@@ -385,7 +429,7 @@ const routes: [string, RegExp, Route][] = [
 		return { retried: m[1] };
 	}],
 	["GET", /^\/audit$/, async () =>
-		existsSync(AUDIT_LOG) ? readFileSync(AUDIT_LOG, "utf8").trim().split("\n").slice(-200).map((line) => JSON.parse(line)) : []],
+		existsSync(AUDIT_LOG) ? auditTail(200) : []],
 ];
 
 const server = createServer(async (request, response) => {

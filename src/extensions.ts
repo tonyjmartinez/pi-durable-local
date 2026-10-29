@@ -1,7 +1,9 @@
 // Every extension the daemon installs: coding context, shared memory, cross-session messaging, web access,
 // the gated PR merge, project loops, and the safety guard.
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,7 +29,7 @@ import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, typ
 import { checkToolCall, protectedMatches } from "./guard.ts";
 import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
 import { effectiveRisk, type ParsedPr, parsePrBody, PR_TEMPLATE, type RiskFile, riskFloor, type Tier } from "./prtemplate.ts";
-import { Approvals, audit, type Loop, Loops, type Memory, Memories, Parked, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
+import { Approvals, audit, Branches, type Loop, Loops, type Memory, Memories, Parked, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
 
 const run = promisify(execFile);
 
@@ -284,14 +286,31 @@ export const Sessions_ = defineExtension({
 // ---------------------------------------------------------------------------------------------------------------
 // Web access.
 
-function isPrivateHost(hostname: string): boolean {
-	return (
-		hostname === "localhost" ||
-		hostname.endsWith(".local") ||
-		hostname.endsWith(".internal") ||
-		/^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|\[?::1\]?$|\[?f[cd])/i.test(hostname)
-	);
+const PRIVATE_RANGES = (() => {
+	const list = new BlockList();
+	for (const [net, bits] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4]] as const) {
+		list.addSubnet(net, bits, "ipv4");
+	}
+	for (const [net, bits] of [["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["64:ff9b::", 96]] as const) list.addSubnet(net, bits, "ipv6");
+	return list;
+})();
+
+/** True for loopback, private, link-local, CGNAT, multicast and reserved addresses, including IPv4-mapped IPv6. */
+export function isPrivateAddress(address: string): boolean {
+	const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1];
+	if (mapped !== undefined) return PRIVATE_RANGES.check(mapped, "ipv4");
+	return PRIVATE_RANGES.check(address, isIP(address) === 6 ? "ipv6" : "ipv4");
 }
+
+/** Resolve a hostname and refuse it if any address it resolves to is private (string checks alone miss rebinding names). */
+async function assertPublicHost(hostname: string): Promise<void> {
+	const bare = hostname.replace(/^\[|\]$/g, "");
+	if (bare === "localhost" || bare.endsWith(".local") || bare.endsWith(".internal") || bare.endsWith(".localhost")) throw new Error("local names are blocked");
+	const addresses = isIP(bare) ? [{ address: bare }] : await lookup(bare, { all: true });
+	if (addresses.length === 0 || addresses.some((entry) => isPrivateAddress(entry.address))) throw new Error(`${hostname} resolves to a private address`);
+}
+
+const FETCH_MAX_BYTES = 2 * 1024 * 1024;
 
 export function htmlToText(html: string): string {
 	return html
@@ -387,20 +406,47 @@ export const Web_ = defineExtension({
 				} catch {
 					return fail("Invalid URL");
 				}
-				if (!/^https?:$/.test(url.protocol)) return fail("Only http(s) URLs");
-				if (isPrivateHost(url.hostname)) return fail("Private and local addresses are blocked");
-				const response = await fetch(url, {
-					headers: { "User-Agent": "pi-durable-local/0.1 (+agent fetch)", Accept: "text/html,text/plain,application/json,*/*" },
-					redirect: "follow",
-					signal: AbortSignal.any([context.abortSignal ?? new AbortController().signal, AbortSignal.timeout(30_000)]),
-				});
-				if (isPrivateHost(new URL(response.url).hostname)) return fail("Redirected to a private address; blocked");
+				const signal = AbortSignal.any([context.abortSignal ?? new AbortController().signal, AbortSignal.timeout(30_000)]);
+				let response: Response | undefined;
+				// Follow redirects by hand so every hop's host is resolved and checked before it is contacted.
+				for (let hop = 0; hop <= 5; hop++) {
+					if (!/^https?:$/.test(url.protocol)) return fail("Only http(s) URLs");
+					try {
+						await assertPublicHost(url.hostname);
+					} catch (error) {
+						return fail(`Blocked: ${(error as Error).message}`);
+					}
+					response = await fetch(url, {
+						headers: { "User-Agent": "pi-durable-local/0.1 (+agent fetch)", Accept: "text/html,text/plain,application/json,*/*" },
+						redirect: "manual",
+						signal,
+					});
+					const location = response.headers.get("location");
+					if (response.status < 300 || response.status >= 400 || location === null) break;
+					url = new URL(location, url);
+					if (hop === 5) return fail("Too many redirects");
+				}
+				if (response === undefined) return fail("No response");
+				// Read at most FETCH_MAX_BYTES; a huge body is cut, not buffered whole.
+				const chunks: Uint8Array[] = [];
+				let total = 0;
+				const reader = response.body?.getReader();
+				while (reader !== undefined) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					chunks.push(value);
+					total += value.byteLength;
+					if (total >= FETCH_MAX_BYTES) {
+						await reader.cancel();
+						break;
+					}
+				}
+				const raw = Buffer.concat(chunks).toString("utf8");
 				const type = response.headers.get("content-type") ?? "";
-				const raw = await response.text();
 				const body = type.includes("html") ? htmlToText(raw) : raw;
 				const max = args.maxChars ?? 30_000;
 				return text(
-					`${response.status} ${response.url}\n\n${body.length > max ? `${body.slice(0, max)}\n…(truncated, ${body.length} chars total)` : body}`,
+					`${response.status} ${url.href}${total >= FETCH_MAX_BYTES ? " (cut at 2 MB)" : ""}\n\n${body.length > max ? `${body.slice(0, max)}\n…(truncated, ${body.length} chars total)` : body}`,
 				);
 			},
 		}),
@@ -433,7 +479,7 @@ type PrView = {
 async function gh(args: string[], context: Context, cwd?: string): Promise<string> {
 	const env: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: "1" };
 	delete env.GH_CONFIG_DIR;
-	const { stdout } = await run("gh", args, { maxBuffer: 64 * 1024 * 1024, signal: context.abortSignal, env, ...(cwd ? { cwd } : {}) });
+	const { stdout } = await run("gh", args, { maxBuffer: 64 * 1024 * 1024, timeout: 120_000, signal: context.abortSignal, env, ...(cwd ? { cwd } : {}) });
 	return stdout;
 }
 
@@ -476,10 +522,31 @@ async function pushWorkBranch(session: string, info: SessionInfo, branch: string
 	if (!branch.startsWith(policy.automerge.branchPrefix) || !WORK_BRANCH.test(branch) || branch.includes("..")) {
 		throw new Error(`branch must look like ${policy.automerge.branchPrefix}short-name (got "${branch}")`);
 	}
+	const repo = githubRepoOf(info.remote);
+	if (repo === undefined) throw new Error("this session's origin is not a GitHub repo");
+	const ref = `${repo}:${branch}`;
+	// One session per work branch: no session can overwrite another's PR head.
+	const owner = (await harness().snapshot(Branches, context))?.byRef[ref];
+	if (owner !== undefined && owner.session !== session) throw new Error(`${branch} belongs to session ${owner.session}; use your own branch name`);
 	const mirror = await ensureMirror(session, info, context);
+	const base = await baseBranchOf(repo, policy, context);
+	await git(["-C", mirror, "fetch", "--no-tags", "--quiet", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`], context);
 	await git(["-C", mirror, "fetch", "--no-tags", "--quiet", info.cwd, `+refs/heads/${branch}:refs/heads/${branch}`], context);
+	// GitHub runs workflow files from a pushed branch with the repository's secrets, before any review or merge.
+	// So agents may not push them at all; Tony adds CI himself.
+	const changed = (await git(["-C", mirror, "diff", "--name-only", `refs/remotes/origin/${base}...refs/heads/${branch}`], context)).split("\n").filter(Boolean);
+	const workflow = changed.filter((path) => path.startsWith(".github/"));
+	if (workflow.length > 0) {
+		audit("push_refused", { session, branch, reason: "workflow files", paths: workflow });
+		throw new Error(
+			`refusing to push changes under .github/ (${workflow.join(", ")}): GitHub would run them with this repo's secrets before review. Put a proposed workflow at docs/proposed-ci/<name>.yml instead and ask Tony to install it.`,
+		);
+	}
 	const sha = await git(["-C", mirror, "rev-parse", `refs/heads/${branch}`], context);
 	await git(["-C", mirror, "push", "--quiet", "origin", `${force ? "+" : ""}refs/heads/${branch}:refs/heads/${branch}`], context);
+	await harness().commit(async (tx) => {
+		(await tx.doc(Branches)).byRef[ref] = { session, pushedAt: Date.now(), sha };
+	}, context);
 	audit("pushed", { session, branch, sha, force });
 	return sha;
 }
@@ -526,8 +593,11 @@ type CheckRun = { name: string; status: string; conclusion: string | null; app?:
 
 /** Check runs and commit statuses for one exact commit, as decidePr's buckets. Only GitHub Actions can count as a pass. */
 async function checksFor(repo: string, sha: string, context: Context): Promise<PrTickState["checks"]> {
-	const runs = (JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/check-runs?per_page=100`], context)) as { check_runs: CheckRun[] }).check_runs;
-	const statuses = (JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/status`], context)) as { statuses: { context: string; state: string }[] }).statuses;
+	const runs = (await gh(["api", "--paginate", `repos/${repo}/commits/${sha}/check-runs?per_page=100`, "--jq", ".check_runs[]"], context))
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as CheckRun);
+	const statuses = (JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/status?per_page=100`], context)) as { statuses: { context: string; state: string }[] }).statuses;
 	const checks: { name: string; bucket: CheckBucket }[] = [];
 	for (const run of runs) {
 		const bucket: CheckBucket =
@@ -548,10 +618,11 @@ async function checksFor(repo: string, sha: string, context: Context): Promise<P
 /** Unresolved review threads (a read-only GraphQL query by the daemon). */
 async function unresolvedThreadsOf(repo: string, number: number, context: Context): Promise<{ path?: string; line?: number; body?: string }[]> {
 	const [owner, name] = repo.split("/");
-	const query = "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:50){nodes{isResolved path line comments(first:1){nodes{body}}}}}}}";
+	const query = "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved path line comments(first:1){nodes{body}}}}}}}";
 	const out = JSON.parse(await gh(["api", "graphql", "-f", `query=${query}`, "-F", `o=${owner}`, "-F", `n=${name}`, "-F", `p=${number}`], context)) as {
-		data: { repository: { pullRequest: { reviewThreads: { nodes: { isResolved: boolean; path?: string; line?: number; comments: { nodes: { body: string }[] } }[] } } } };
+		data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: boolean }; nodes: { isResolved: boolean; path?: string; line?: number; comments: { nodes: { body: string }[] } }[] } } } };
 	};
+	if (out.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage) throw new Error("more than 100 review threads");
 	return out.data.repository.pullRequest.reviewThreads.nodes
 		.filter((t) => !t.isResolved)
 		.map((t) => ({ ...(t.path ? { path: t.path } : {}), ...(t.line ? { line: t.line } : {}), body: t.comments.nodes[0]?.body ?? "" }));
@@ -583,16 +654,26 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 	if (parsed.missing.length > 0) needsHuman.push(`PR description is missing: ${parsed.missing.join(", ")}`);
 	if (parsed.testing?.ranNothing) needsHuman.push("Testing says nothing was run");
 	// The review covers this exact commit AND this exact description: editing either needs a fresh review.
-	const unresolvedThreads = await unresolvedThreadsOf(repo, number, context).catch(() => []);
+	let unresolvedThreads: { path?: string; line?: number; body?: string }[] = [];
+	try {
+		unresolvedThreads = await unresolvedThreadsOf(repo, number, context);
+	} catch {
+		needsHuman.push("could not read review threads");
+	}
 	const reviewKey = `${repo}#${number}@${pr.headRefOid}:${createHash("sha256").update(`${pr.title}\n${pr.body ?? ""}`).digest("hex").slice(0, 16)}`;
 	const review = (await reader.snapshot(Reviews, context))?.byHead[reviewKey];
 	const approval = (await reader.snapshot(Approvals, context))?.byPr[`${repo}#${number}`];
+	// Right after a push only the fastest workflow may have registered; give the rest time to appear.
+	const pushed = (await reader.snapshot(Branches, context))?.byRef[`${repo}:${pr.headRefName}`];
+	const settling = pushed !== undefined && pushed.sha === pr.headRefOid && Date.now() - pushed.pushedAt < 90_000;
+	const checks = [...(await checksFor(repo, pr.headRefOid, context))];
+	if (settling) checks.push({ name: "(waiting 90s after push for all checks to register)", bucket: "pending" });
 	const state: PrTickState = {
 		state: pr.state as PrTickState["state"],
 		isDraft: pr.isDraft,
 		conflicts: pr.mergeable === "CONFLICTING",
 		behind: pr.mergeStateStatus === "BEHIND",
-		checks: await checksFor(repo, pr.headRefOid, context),
+		checks,
 		reviewDecision: pr.reviewDecision || null,
 		unresolvedThreads,
 		tier: tier.tier,
@@ -633,16 +714,25 @@ export async function tickPr(
 	let decision = decidePr(facts.state, SHIP_OPTIONS);
 	let reviewed = false;
 	const runReview = async () => {
-		const diff = await gh(["api", `repos/${repo}/pulls/${number}`, "-H", "Accept: application/vnd.github.diff"], context);
+		const sha = facts.pr.headRefOid;
+		// The diff of exactly the commit this verdict will be stored under, never "the PR as of now".
+		const diff = await gh(["api", `repos/${repo}/compare/${facts.pr.baseRefName}...${sha}`, "-H", "Accept: application/vnd.github.diff"], context);
 		const verdict = await reviewWith(models, policy, context)(facts.pr, diff);
+		const now = JSON.parse(await gh(["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,title,body"], context)) as { headRefOid: string; title: string; body: string };
+		if (now.headRefOid !== sha || now.title !== facts.pr.title || (now.body ?? "") !== (facts.pr.body ?? "")) {
+			throw new Error("the PR changed while it was being reviewed; tick again");
+		}
 		await harnessLike.commit(async (tx) => {
 			(await tx.doc(Reviews)).byHead[facts.reviewKey] = { ...verdict, at: Date.now() };
 		}, context);
-		audit("reviewed", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid, approve: verdict.approve, reasons: verdict.reasons });
+		audit("reviewed", { session: options.session, repo, pr: number, sha, approve: verdict.approve, reasons: verdict.reasons });
 		reviewed = true;
 		facts = await gatherShipFacts(repo, number, policy, harnessLike, context);
 		decision = decidePr(facts.state, SHIP_OPTIONS);
 	};
+	// Foreign PRs (forks, other authors, non-work branches) never get a review: no spend on PRs we don't own.
+	const foreign = facts.pr.isCrossRepository || facts.pr.author.login !== (await viewerLogin(context)) || !facts.pr.headRefName.startsWith(policy.automerge.branchPrefix);
+	if (foreign) return { decision: { action: "park-human", reason: "not one of the factory's own work-branch PRs" }, facts, reviewed };
 	if (decision.action === "review") await runReview();
 	// A PR parked for a human (with green CI) gets the independent review too, so Tony sees it with the park.
 	else if (decision.action === "park-human" && facts.state.aiReview === undefined && facts.state.checks.some((c) => c.bucket === "pass")) {
@@ -650,6 +740,7 @@ export async function tickPr(
 	}
 	if (decision.action === "merge" && options.allowMerge) {
 		const subject = `${facts.pr.title} (#${number})`;
+		audit("merging", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid });
 		await gh(
 			["pr", "merge", String(number), "--repo", repo, `--${policy.automerge.mergeMethod}`, "--subject", subject,
 				"--delete-branch", "--match-head-commit", facts.pr.headRefOid],
@@ -658,7 +749,7 @@ export async function tickPr(
 		audit("merged", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid, tier: facts.state.tier });
 		return { decision, facts, merged: true, reviewed };
 	}
-	if (decision.action === "park-human" || decision.action === "no-merge-authority") {
+	if ((decision.action === "park-human" || decision.action === "no-merge-authority") && options.allowMerge) {
 		const first = await harnessLike.commit(async (tx) => {
 			const parked = await tx.doc(Parked);
 			if (parked.byKey[facts.reviewKey] !== undefined) return false;
@@ -667,7 +758,7 @@ export async function tickPr(
 		}, context);
 		if (first) {
 			const review = facts.state.aiReview === undefined ? [] : [`review: ${facts.state.aiReview ? "approved" : "rejected"}${facts.state.aiReviewReasons?.length ? ` (${facts.state.aiReviewReasons.join("; ")})` : ""}`];
-			audit("parked", { session: options.session, repo, pr: number, action: decision.action, reason: decision.reason, details: [...(decision.details ?? []), ...review] });
+			audit("parked", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid.slice(0, 7), action: decision.action, reason: decision.reason, details: [...(decision.details ?? []), ...review] });
 		}
 		return { decision, facts, reviewed, firstPark: first };
 	}
@@ -753,7 +844,13 @@ export async function fileFriction(repo: string, input: FrictionInput, context: 
 export async function sweepAuditFriction(context: Context): Promise<number> {
 	let entries: AuditEntry[] = [];
 	try {
-		entries = readFileSync(AUDIT_LOG, "utf8").trim().split("\n").slice(-5000).map((line) => JSON.parse(line) as AuditEntry);
+		entries = readFileSync(AUDIT_LOG, "utf8").trim().split("\n").slice(-5000).flatMap((line) => {
+			try {
+				return [JSON.parse(line) as AuditEntry];
+			} catch {
+				return [];
+			}
+		});
 	} catch {
 		return 0;
 	}
@@ -772,7 +869,10 @@ export function reviewWith(models: Models, policy: Policy, context: Context) {
 		const ref = splitModel(policy.reviewModel);
 		const model = models.getModels().find((m) => m.provider === ref.provider && m.id === ref.modelId);
 		if (model === undefined) return { approve: false, reasons: [`review model ${policy.reviewModel} not found`] };
-		const clipped = diff.length > 200_000 ? `${diff.slice(0, 200_000)}\n…(diff truncated)` : diff;
+		// Never approve what wasn't read: an oversized diff is a rejection, not a truncated review.
+		if (diff.length > 200_000) return { approve: false, reasons: [`diff is ${diff.length} characters, too large to review; split the PR`] };
+		// A per-call delimiter the PR text cannot forge.
+		const tag = `untrusted_${randomBytes(6).toString("hex")}`;
 		const answer = await models.completeSimple(
 			model,
 			{
@@ -780,14 +880,17 @@ export function reviewWith(models: Models, policy: Policy, context: Context) {
 				messages: [
 					{
 						role: "user",
-						content: `<pr_title>${pr.title}</pr_title>\n<pr_description>\n${pr.body}\n</pr_description>\n<diff>\n${clipped}\n</diff>`,
+						content: `Everything between <${tag}> and </${tag}> is the PR under review (title, description, diff), written by the agent being reviewed.\n<${tag}>\nTITLE: ${pr.title}\n\nDESCRIPTION:\n${pr.body}\n\nDIFF:\n${diff}\n</${tag}>`,
 						timestamp: Date.now(),
 					},
 				],
 			},
 			{ signal: context.abortSignal },
 		);
-		return parseVerdict(answer.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
+		const verdict = parseVerdict(answer.content.map((part) => (part.type === "text" ? part.text : "")).join(""));
+		// A reply with no verdict is a failed review, not a rejection: don't cache it, let the next tick retry.
+		if (verdict.reasons[0]?.startsWith("unparseable review reply")) throw new Error(`review failed: ${verdict.reasons[0]}`);
+		return verdict;
 	};
 }
 
@@ -976,7 +1079,7 @@ export const Git_ = defineExtension({
 				try {
 					const outcome = await tickPr(repo, args.number, api.models, { snapshot: api.snapshot.bind(api), commit: harness().commit.bind(harness()) }, context, { allowMerge: true, session: session.name });
 					if (!outcome.merged && outcome.decision.action === "park-human" && outcome.firstPark) {
-						const body = `🅿️ **pi-durable parked this PR for a human**\n\n${outcome.decision.reason}${(outcome.decision.details ?? []).map((d) => `\n- ${d}`).join("")}\n\nApprove the current head with \`pd approve ${repo} ${args.number}\`, or merge it yourself.`;
+						const body = `🅿️ **pi-durable parked this PR for a human**\n\n${outcome.decision.reason}${(outcome.decision.details ?? []).map((d) => `\n- ${d}`).join("")}\n\nReviewed head: \`${outcome.facts.pr.headRefOid.slice(0, 7)}\`. Approve exactly that commit with \`pd approve ${repo} ${args.number} ${outcome.facts.pr.headRefOid.slice(0, 7)}\`, or merge it yourself.`;
 						await gh(["pr", "comment", String(args.number), "--repo", repo, "--body", body], context).catch(() => undefined);
 					}
 					return outcome.merged ? text(describeTick(outcome)) : { ...text(describeTick(outcome)), isError: outcome.decision.action === "fix-ci" || outcome.decision.action === "address-review" };
@@ -1039,7 +1142,10 @@ Advance this goal by one meaningful, reviewable step, then stop. Each iteration:
 5. Finish by calling loop_report with status "continue", "done" (goal fully achieved), or "blocked" (needs Tony), and a one-line note.`;
 }
 
-type LoopCheckpoint = { phase: "wait" } | { phase: "run"; iteration: number };
+type LoopCheckpoint =
+	| { phase: "wait" }
+	| { phase: "run"; iteration: number }
+	| { phase: "await"; iteration: number; baseSha?: string };
 
 /** What the loop gate needs, from GitHub via the daemon's gh: no model call, a handful of API requests. */
 async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, context: Context): Promise<GateRepo | undefined> {
@@ -1053,7 +1159,7 @@ async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, conte
 	}[]).filter((pr) => pr.headRefName.startsWith(policy.automerge.branchPrefix));
 	const openAgentPrs: GatePr[] = [];
 	for (const pr of prs) {
-		const checks = await checksFor(repo, pr.headRefOid, context);
+		const checks = [...(await checksFor(repo, pr.headRefOid, context))];
 		const state = checks.some((c) => c.bucket === "fail" || c.bucket === "cancel") ? "fail" : checks.some((c) => c.bucket === "pending") ? "pending" : "pass";
 		openAgentPrs.push({ number: pr.number, headSha: pr.headRefOid, checksState: state });
 	}
@@ -1095,6 +1201,12 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				return stop("paused", `budget reached: $${spent.toFixed(2)} of $${loop.budgetUsd}`);
 			}
 			if (loop.iteration >= loop.maxIterations) return stop("done", `reached ${loop.maxIterations} iterations`);
+			// A crash between submitting and checkpointing: this iteration already went out, so don't gate it again.
+			const already = await harness().commit((tx) => tx.submissionByRequest(session.conversationId as never, `loop:${loop.id}:${task.state.checkpoint.iteration}`), context);
+			if (already !== undefined) {
+				await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration: task.state.checkpoint.iteration } }), context);
+				return;
+			}
 
 			// The cheap gate: decide from GitHub facts whether a model call is worth it at all.
 			const facts = await gateFacts(loop, session, policy, context).catch(() => undefined);
@@ -1112,32 +1224,41 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 					}, context);
 					return;
 				}
-				await runtime.commit(async (tx) => {
-					(await tx.doc(Loops)).byId[task.input.loopId]!.lastSeenBaseSha = facts.baseHeadSha;
-					// A plain document write: the task's state is unchanged until the iteration settles.
-					return undefined;
-				}, context);
 			}
 
 			const conversation = await harness().conversation(session.conversationId as never, context);
 			if (conversation === undefined) return stop("failed", "conversation missing");
-			// The request ID makes a rerun after a crash find the same submission instead of sending twice.
-			const submission = await conversation.submit(
+			const iteration = task.state.checkpoint.iteration;
+			// The request ID makes a resubmission find the same submission, never a second one.
+			await conversation.submit(
 				{
 					type: "input",
 					content: loopPrompt(loop, policy),
-					entry: { kind: "pdl.loop-tick", data: { loopId: loop.id, iteration: task.state.checkpoint.iteration } },
-					requestId: `loop:${loop.id}:${task.state.checkpoint.iteration}`,
+					entry: { kind: "pdl.loop-tick", data: { loopId: loop.id, iteration } },
+					requestId: `loop:${loop.id}:${iteration}`,
 				},
 				context,
 			);
-			const settled = await submission.wait(context);
+			await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration, ...(facts ? { baseSha: facts.baseHeadSha } : {}) } }), context);
+		},
+		await: async (task, runtime, context) => {
+			const { iteration, baseSha } = task.state.checkpoint;
+			const loop = (await runtime.snapshot(Loops, context))?.byId[task.input.loopId];
+			const session = loop === undefined ? undefined : (await runtime.snapshot(Sessions, context))?.byName[loop.session];
+			const record = session === undefined
+				? undefined
+				: await harness().commit((tx) => tx.submissionByRequest(session.conversationId as never, `loop:${task.input.loopId}:${iteration}`), context);
+			const submission = record === undefined ? undefined : await harness().submission(record.id, context);
+			const settled = submission === undefined ? undefined : await submission.wait(context);
 			await runtime.commit(async (tx) => {
-				const current = (await tx.doc(Loops)).byId[task.input.loopId]!;
-				current.iteration = task.state.checkpoint.iteration + 1;
+				const current = (await tx.doc(Loops)).byId[task.input.loopId];
+				if (current === undefined) return { status: "terminal", outcome: { status: "completed", result: { iterations: iteration } } };
+				current.iteration = iteration + 1;
 				current.lastRunAt = Date.now();
 				current.nextRunAt = Date.now() + current.intervalMinutes * 60_000;
-				if (settled.status !== "done" && current.status === "active") current.note = `iteration ${current.iteration} ended ${settled.status}`;
+				// Only a completed iteration counts as having seen this base; a failed one retries even if nothing changed.
+				if (settled?.status === "done" && baseSha !== undefined) current.lastSeenBaseSha = baseSha;
+				if (settled?.status !== "done" && current.status === "active") current.note = `iteration ${current.iteration} ended ${settled?.status ?? "without a submission"}`;
 				if (current.status === "active" && current.iteration >= current.maxIterations) {
 					current.status = "done";
 					current.note = `reached ${current.maxIterations} iterations`;
@@ -1169,14 +1290,15 @@ export const Loops_ = defineExtension({
 				note: Type.String(),
 			}),
 			execute: async (args, api, context) => {
+				const { name: caller } = await sessionCwd(api, api.conversationId, context);
 				const updated = await api.commit(async (tx) => {
 					const loop = (await tx.doc(Loops)).byId[args.loopId];
-					if (loop === undefined) return undefined;
+					if (loop === undefined || loop.session !== caller) return undefined;
 					loop.note = args.note;
 					if (loop.status === "active" && args.status !== "continue") loop.status = args.status === "done" ? "done" : "paused";
 					return { ...loop };
 				}, context);
-				if (updated === undefined) return fail(`No loop ${args.loopId}`);
+				if (updated === undefined) return fail(`No loop ${args.loopId} in your session`);
 				audit("loop_report", { loop: args.loopId, status: args.status, note: args.note });
 				return { ...text(`Loop ${args.loopId}: ${updated.status} — ${args.note}`), control: { terminate: true } };
 			},
