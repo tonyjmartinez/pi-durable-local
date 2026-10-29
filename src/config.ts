@@ -19,8 +19,12 @@ export type Policy = {
 	reviewModel: string;
 	/** Model that runs Anthropic server-side web search for the web_search tool. */
 	searchModel: string;
-	/** Cheaper model for the subagent tool's delegated work. */
+	/** Default (cheapest) model for the subagent tool's delegated work. */
 	subagentModel: string;
+	/** Subagent model for product planning and decisions. */
+	planModel: string;
+	/** Subagent model reserved for big swings and design decisions; every use is audited with its reason. */
+	deepModel: string;
 	thinkingLevel: "off" | "minimal" | "low" | "medium" | "high";
 	/** Directories agents may write to. Edits and writes elsewhere are blocked. */
 	writableRoots: string[];
@@ -49,10 +53,12 @@ export type Policy = {
 };
 
 export const DEFAULT_POLICY: Policy = {
-	model: "anthropic/claude-opus-5-5",
+	model: "anthropic/claude-sonnet-5-5",
 	reviewModel: "anthropic/claude-opus-5-5",
 	searchModel: "anthropic/claude-opus-5-5",
 	subagentModel: "anthropic/claude-haiku-5-5",
+	planModel: "anthropic/claude-sonnet-5-5",
+	deepModel: "anthropic/claude-opus-5-5",
 	thinkingLevel: "medium",
 	writableRoots: [join(home, "proj"), "/tmp"],
 	automerge: {

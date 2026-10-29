@@ -58,7 +58,7 @@ Working rules:
 - Ship loop: after \`pr_create\`, call \`pr_tick\` with the PR number and do exactly the one action it returns (fix-ci, address-review, resolve-conflicts, update-branch...), push, and tick again. Stop when it says done (merged), park-human, or no-merge-authority. The daemon computes the PR's risk tier from the diff; declaring a higher Risk is honest, declaring lower changes nothing.
 - Only \`pr_tick\` merges, and only when every rule allows it. If it parks a PR, leave it for Tony; never try to work around a rule.
 - Record durable facts (decisions, conventions, gotchas, preferences Tony states) with \`memory_save\`; check \`memory_search\` before re-deriving something.
-- Delegate to save cost: hand focused, well-specified work (research, scoped implementation, tests, diagnosing a failing check) to the \`subagent\` tool, which runs a cheaper model in your sandbox. Keep planning, judgment and shipping yourself, and check its report before acting on it.
+- Delegate to save cost with the \`subagent\` tool (same sandbox, cannot ship): tier fast (default) for research, scoped implementation, tests and diagnosing checks; tier plan for product decisions and planning what to build next; tier deep only for a big swing or a design decision, with a stated reason. Keep judgment and shipping yourself, and check each report before acting on it.
 - Coordinate with other sessions via \`sessions_list\` / \`session_send\` instead of editing the same repo at once.
 - If blocked on a decision that is Tony's to make, say so plainly and stop rather than guessing.`;
 
@@ -1052,6 +1052,13 @@ export const Subagent_: ReturnType<typeof defineExtension> = defineExtension({
 				"Delegate one focused, self-contained task (research, a scoped implementation, writing tests, reviewing a diff, running and diagnosing checks) to a cheaper subagent model that works in your directory with the same sandbox. It returns its report. Give it everything it needs: the goal, the relevant files, constraints, and how to verify. Use it to save cost on mechanical or exploratory work; keep planning, judgment, and shipping (git_push, pr_create, pr_merge) yourself.",
 			parameters: Type.Object({
 				task: Type.String({ description: "The complete brief: goal, context, files, constraints, verification" }),
+				tier: Type.Optional(
+					Type.Union([Type.Literal("fast"), Type.Literal("plan"), Type.Literal("deep")], {
+						description:
+							"fast (default, cheapest): research, scoped implementation, tests, checks. plan: product decisions and planning the next steps. deep: only for a big swing or a design decision; give the reason in `why`.",
+					}),
+				),
+				why: Type.Optional(Type.String({ description: "Required for tier deep: why this needs the most capable model" })),
 			}),
 			// A rerun after a crash finds the same child and the same submission instead of starting over.
 			replay: "safe",
@@ -1059,7 +1066,10 @@ export const Subagent_: ReturnType<typeof defineExtension> = defineExtension({
 				const policy = loadPolicy();
 				const { name } = await sessionCwd(api, api.conversationId, context);
 				if (name === undefined) return fail("Subagents are only available inside a named session.");
-				const ref = splitModel(policy.subagentModel);
+				const tier = args.tier ?? "fast";
+				if (tier === "deep" && !args.why?.trim()) return fail("tier deep needs a `why`: it is reserved for big swings and design decisions.");
+				const modelRef = tier === "deep" ? policy.deepModel : tier === "plan" ? policy.planModel : policy.subagentModel;
+				const ref = splitModel(modelRef);
 				const child = await api.commit(async (tx) => {
 					const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
 					if (existing !== undefined) return existing.id;
@@ -1075,7 +1085,7 @@ export const Subagent_: ReturnType<typeof defineExtension> = defineExtension({
 					return created.id;
 				}, context);
 				await api.details({ conversationId: child }, context);
-				audit("subagent", { session: name, child, model: policy.subagentModel, task: args.task.slice(0, 300) });
+				audit("subagent", { session: name, child, tier, model: modelRef, ...(args.why ? { why: args.why } : {}), task: args.task.slice(0, 300) });
 				const handle = await api.conversation(child, context);
 				if (handle === undefined) return fail("Subagent conversation vanished.");
 				const settled = await (await handle.submit({ type: "input", content: args.task, requestId: `subagent:${api.taskId}` }, context)).wait(context);
@@ -1087,7 +1097,7 @@ export const Subagent_: ReturnType<typeof defineExtension> = defineExtension({
 					?.map((part) => (part.type === "text" ? part.text : ""))
 					.join("")
 					.trim();
-				return text(`Subagent (${policy.subagentModel}) report:\n${report || "(no text answer)"}`);
+				return text(`Subagent (${tier}, ${modelRef}) report:\n${report || "(no text answer)"}`);
 			},
 		}),
 	],
