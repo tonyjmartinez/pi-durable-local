@@ -71,6 +71,8 @@ details > summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
 .composer textarea { width: 100%; resize: vertical; min-height: 56px; max-height: 40vh; }
 table { width: 100%; border-collapse: collapse; }
 td, th { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.goal { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; white-space: pre-wrap; word-break: break-word; }
+.goal.open { display: block; -webkit-line-clamp: unset; }
 pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
 @media (min-width: 640px) { nav { flex: 1; order: 0; } header h1 { flex: none; } }
 @media (max-width: 520px) { main { padding: 10px; } header { padding: 6px 10px; } nav button { padding: 8px 10px; } }
@@ -89,7 +91,7 @@ const TOKEN = document.querySelector('meta[name="pd-token"]').content;
 const $ = (id) => document.getElementById(id);
 const main = $("main");
 
-// Build DOM without innerHTML: transcript text comes from models and tools, so it is never parsed as markup.
+// Build DOM from text nodes only: transcript text comes from models and tools, so it is never parsed as markup.
 function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -319,7 +321,7 @@ async function renderLoops() {
       l.status === "active" ? h("button", { class: "btn", onclick: () => act(l.id, "pause") }, "Pause") : null,
       l.status === "paused" ? h("button", { class: "btn", onclick: () => act(l.id, "resume") }, "Resume") : null,
       l.status === "active" || l.status === "paused" ? h("button", { class: "btn danger", onclick: () => { if (confirm("Stop loop " + l.id + "?")) act(l.id, "stop"); } }, "Stop") : null),
-    h("div", {}, l.goal),
+    h("div", { class: "goal", title: "Tap to expand", onclick: (e) => e.currentTarget.classList.toggle("open") }, l.goal),
     h("div", { class: "dim" }, "iteration " + l.iteration + "/" + l.maxIterations + " · every " + l.intervalMinutes + "m · budget " + money(l.budgetUsd) + " · last " + ago(l.lastRunAt) + (l.status === "active" ? " · next " + until(l.nextRunAt) : "")),
     l.note ? h("div", { class: "dim" }, l.note) : null));
   const options = status.sessions.map((s) => h("option", { value: s.name }, s.name));

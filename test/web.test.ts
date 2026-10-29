@@ -1,10 +1,11 @@
 // pd-ui: auth, CSRF, host checks, the proxy allowlist, and streaming, against a fake daemon on a Unix socket.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer, request } from "node:http";
 import type { IncomingHttpHeaders, Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Script } from "node:vm";
 import { after, before, describe, it } from "node:test";
 import { createUiServer, loadOrCreateToken } from "../src/web.ts";
 
@@ -245,5 +246,41 @@ describe("token file", () => {
 		assert.match(first, /^[0-9a-f]{64}$/);
 		assert.equal(statSync(file).mode & 0o777, 0o600);
 		assert.equal(loadOrCreateToken(file), first);
+	});
+});
+
+describe("page source", () => {
+	const page = readFileSync(join(import.meta.dirname, "..", "src", "web", "index.html"), "utf8");
+	const script = /<script nonce="__NONCE__">([\s\S]*)<\/script>/.exec(page)?.[1] ?? "";
+
+	it("has the placeholders the server fills in and a script that parses", () => {
+		assert.ok(page.includes("__TOKEN__") && page.includes("__NONCE__"));
+		assert.ok(script.length > 1000);
+		assert.doesNotThrow(() => new Script(script));
+	});
+
+	it("never parses model or tool output as markup", () => {
+		for (const bad of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"]) {
+			assert.ok(!script.includes(bad), `script must not use ${bad}`);
+		}
+	});
+
+	it("loads nothing from outside and has no inline handlers or style attributes (they break the CSP)", () => {
+		assert.ok(!/(src|href)="https?:/.test(page));
+		assert.ok(!/\son[a-z]+="/.test(page.replace(script, "")));
+		assert.ok(!/\sstyle="/.test(page));
+	});
+
+	it("only calls API routes the proxy allows", () => {
+		const calls = [...script.matchAll(/api\("(GET|POST)",\s*"(\/[^"]*)"/g)].map((m) => ({ method: m[1]!, path: m[2]! }));
+		assert.ok(calls.length >= 8);
+		for (const { method, path } of calls) {
+			// A trailing slash means the rest of the path is built from a session name or loop id.
+			const known = /^\/(status|memory|audit)$/.test(path) && method === "GET"
+				|| /^\/(sessions|loops)$/.test(path)
+				|| (path === "/sessions/" || path === "/loops/") && method === "POST"
+				|| path === "/sessions/" && method === "GET";
+			assert.ok(known, `unexpected API call: ${method} ${path}`);
+		}
 	});
 });
