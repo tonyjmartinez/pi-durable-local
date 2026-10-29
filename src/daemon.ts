@@ -23,7 +23,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
 import { dryRunGates, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
-import { audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
+import { Approvals, audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
 const run = promisify(execFile);
@@ -337,6 +337,16 @@ const routes: [string, RegExp, Route][] = [
 	["GET", /^\/loops$/, async () => Object.values((await harness.snapshot(Loops, context))?.byId ?? {})],
 	["POST", /^\/loops$/, (_m, body) => startLoop(body)],
 	["POST", /^\/loops\/([^/]+)\/(pause|resume|stop)$/, (m) => setLoopStatus(m[1]!, m[2]!)],
+	["POST", /^\/approve$/, async (_m, body) => {
+		const repo = String(body.repo);
+		const number = Number(body.number);
+		const sha = (await run("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"])).stdout.trim();
+		await harness.commit(async (tx) => {
+			(await tx.doc(Approvals)).byPr[`${repo}#${number}`] = { sha, at: Date.now() };
+		}, context);
+		audit("human_approved", { repo, pr: number, sha });
+		return { repo, number, sha };
+	}],
 	["POST", /^\/gates$/, async (_m, body) => dryRunGates(String(body.repo), Number(body.number), models, context)],
 	["POST", /^\/tasks\/([^/]+)\/retry$/, async (m) => {
 		await harness.retryTask(m[1] as never, context);

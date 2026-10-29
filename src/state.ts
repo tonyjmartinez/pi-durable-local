@@ -93,3 +93,21 @@ export function audit(event: string, data: Record<string, unknown>): void {
 		// Auditing must never take a tool call down.
 	}
 }
+
+/** Independent review verdicts, by `owner/repo#number@headSha`, so a review runs once per exact head commit. */
+export const Reviews = defineDoc<{ byHead: Record<string, { approve: boolean; reasons: string[]; at: number }> }>({
+	kind: "pdl.reviews",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byHead: {} }),
+	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
+});
+
+/** Human approvals (`pd approve`), by `owner/repo#number`, pinned to the head SHA that was approved. */
+export const Approvals = defineDoc<{ byPr: Record<string, { sha: string; at: number }> }>({
+	kind: "pdl.approvals",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byPr: {} }),
+	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
+});

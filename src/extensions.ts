@@ -21,7 +21,9 @@ import {
 } from "@earendil-works/pi-durable";
 import { DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
-import { audit, type Loop, Loops, type Memory, Memories, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
+import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
+import { effectiveRisk, type ParsedPr, parsePrBody, PR_TEMPLATE, type RiskFile, riskFloor, type Tier } from "./prtemplate.ts";
+import { Approvals, audit, type Loop, Loops, type Memory, Memories, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
 
 const run = promisify(execFile);
 
@@ -45,19 +47,15 @@ const WORKFLOW = `You are one of several long-running pi-durable agent sessions 
 
 Your environment:
 - Your shell runs in a sandbox: your project directory, /tmp and package caches are writable; the rest of $HOME is read-only; you have no SSH keys and no GitHub token. That is deliberate. Never try to find or use credentials.
-- GitHub goes through tools: \`git_sync\` refreshes origin/* (you can't fetch from GitHub directly), \`git_push\` pushes a work branch, \`pr_create\` pushes and opens a PR, \`pr_status\` / \`pr_list\` read PRs and CI, \`pr_merge\` requests a gated merge.
+- GitHub goes through tools: \`git_sync\` refreshes origin/* (you can't fetch from GitHub directly), \`git_push\` pushes a work branch, \`pr_create\` pushes and opens a PR, \`pr_status\` / \`pr_list\` read PRs and CI, \`pr_tick\` advances a PR and merges it when allowed.
 
 Working rules:
 - Work in your session's directory. Read the project's AGENTS.md/README before changing code.
 - Never work on main. Start from the latest deploy branch, create a branch with the work-branch prefix, and commit small coherent steps.
 - Verify before you ship: run the project's checks (type-check, tests, build, and the app itself when that is how a change is proven). A PR must say how you verified it.
-- PR descriptions use this shape:
-  Intent: why this change exists, in one or two sentences.
-  Change: what changed.
-  Verification: the commands you ran and what they showed.
-  Door: two-way (easily reverted) or one-way (hard to undo: data migrations, deletions, public API changes, dependency or infrastructure changes).
-  One-way-door PRs are always left for Tony; pr_merge will not merge them.
-- A PR is merged only through \`pr_merge\`, which enforces CI, size, protected-path, and independent review gates. If it refuses, fix the cause or leave the PR for Tony; never try to work around a gate.
+- PR descriptions must fill every field of the template that \`pr_create\` enforces (Intent, Door, Cleanup, Why, Testing, System recap with Risk and Touches). Testing lists the commands you actually ran and their results, and says what you could not verify. Door is one-way for anything hard to undo (data, contracts, security, money, public API); those are always left for Tony.
+- Ship loop: after \`pr_create\`, call \`pr_tick\` with the PR number and do exactly the one action it returns (fix-ci, address-review, resolve-conflicts, update-branch...), push, and tick again. Stop when it says done (merged), park-human, or no-merge-authority. The daemon computes the PR's risk tier from the diff; declaring a higher Risk is honest, declaring lower changes nothing.
+- Only \`pr_tick\` merges, and only when every rule allows it. If it parks a PR, leave it for Tony; never try to work around a rule.
 - Record durable facts (decisions, conventions, gotchas, preferences Tony states) with \`memory_save\`; check \`memory_search\` before re-deriving something.
 - Delegate to save cost: hand focused, well-specified work (research, scoped implementation, tests, diagnosing a failing check) to the \`subagent\` tool, which runs a cheaper model in your sandbox. Keep planning, judgment and shipping yourself, and check its report before acting on it.
 - Coordinate with other sessions via \`sessions_list\` / \`session_send\` instead of editing the same repo at once.
@@ -519,76 +517,137 @@ async function baseBranchOf(repo: string, policy: Policy, context: Context): Pro
 const PR_FIELDS =
 	"number,title,body,state,isDraft,isCrossRepository,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,mergeable,reviewDecision,url";
 
-export type GateResult = { ok: true; summary: string } | { ok: false; reasons: string[] };
-
 type CheckRun = { name: string; status: string; conclusion: string | null; app?: { slug?: string } };
 
-export async function evaluateMergeGates(
-	repo: string,
-	number: number,
-	policy: Policy,
-	review: (pr: PrView, diff: string) => Promise<{ approve: boolean; reasons: string[] }>,
-	context: Context,
-): Promise<{ result: GateResult; pr?: PrView }> {
-	const rules = policy.automerge;
-	if (!rules.repos.includes(repo)) {
-		return { result: { ok: false, reasons: [`${repo} is not in automerge.repos in ~/.config/pi-durable/policy.json`] } };
+/** Check runs and commit statuses for one exact commit, as decidePr's buckets. Only GitHub Actions can count as a pass. */
+async function checksFor(repo: string, sha: string, context: Context): Promise<PrTickState["checks"]> {
+	const runs = (JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/check-runs?per_page=100`], context)) as { check_runs: CheckRun[] }).check_runs;
+	const statuses = (JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/status`], context)) as { statuses: { context: string; state: string }[] }).statuses;
+	const checks: { name: string; bucket: CheckBucket }[] = [];
+	for (const run of runs) {
+		const bucket: CheckBucket =
+			run.status !== "completed" ? "pending"
+			: run.conclusion === "success" ? (run.app?.slug === "github-actions" ? "pass" : "skipping")
+			: run.conclusion === "skipped" || run.conclusion === "neutral" ? "skipping"
+			: run.conclusion === "cancelled" ? "cancel"
+			: "fail";
+		checks.push({ name: run.name, bucket });
 	}
-	const pr = JSON.parse(await gh(["pr", "view", String(number), "--repo", repo, "--json", PR_FIELDS], context)) as PrView;
-	const base = await baseBranchOf(repo, policy, context);
-	const reasons: string[] = [];
-	if (pr.state !== "OPEN") reasons.push(`PR is ${pr.state}`);
-	if (pr.isDraft) reasons.push("PR is a draft");
-	if (pr.isCrossRepository) reasons.push("PR comes from a fork");
-	if (pr.author.login !== (await viewerLogin(context))) reasons.push(`PR author ${pr.author.login} is not the daemon's own account`);
-	if (pr.baseRefName !== base) reasons.push(`base is ${pr.baseRefName}, not ${base}`);
-	if (!pr.headRefName.startsWith(rules.branchPrefix)) reasons.push(`head branch ${pr.headRefName} lacks prefix ${rules.branchPrefix}`);
-	if (pr.mergeable !== "MERGEABLE") reasons.push(`GitHub says mergeable=${pr.mergeable}`);
-	if (pr.reviewDecision === "CHANGES_REQUESTED") reasons.push("a reviewer requested changes");
-	const door = /^\s*Door:\s*(two|one)-way\b/im.exec(pr.body)?.[1];
-	if (door === undefined) reasons.push("PR description lacks a 'Door: two-way|one-way' line");
-	if (door === "one") reasons.push("one-way-door change: needs a human merge");
-	if (!/^\s*Verification:/im.test(pr.body)) reasons.push("PR description lacks a 'Verification:' section");
-	const lines = pr.additions + pr.deletions;
-	if (lines > rules.maxChangedLines) reasons.push(`${lines} changed lines > limit ${rules.maxChangedLines}; split the PR`);
-	if (pr.changedFiles > rules.maxChangedFiles) reasons.push(`${pr.changedFiles} files > limit ${rules.maxChangedFiles}`);
+	for (const status of statuses) {
+		// A commit status can be posted by anyone with a token: it can block, never pass.
+		checks.push({ name: status.context, bucket: status.state === "pending" ? "pending" : status.state === "success" ? "skipping" : "fail" });
+	}
+	return checks;
+}
 
-	// Both sides of a rename count: moving a protected file out of its protected path is still touching it.
+export type ShipFacts = { pr: PrView; state: PrTickState; tier: { tier: Tier; reasons: string[] }; parsed: ParsedPr; reviewKey: string };
+
+/** Everything decidePr needs, gathered by the daemon from GitHub. Nothing here is taken from the agent's word alone. */
+export async function gatherShipFacts(repo: string, number: number, policy: Policy, reader: { snapshot: Harness["snapshot"] }, context: Context): Promise<ShipFacts> {
+	const rules = policy.automerge;
+	const pr = JSON.parse(await gh(["pr", "view", String(number), "--repo", repo, "--json", `${PR_FIELDS},mergeStateStatus`], context)) as PrView & { mergeStateStatus: string };
+	const base = await baseBranchOf(repo, policy, context);
 	const files = JSON.parse(
 		await gh(["api", "--paginate", `repos/${repo}/pulls/${number}/files`, "--jq", "[.[] | {filename, previous_filename}]"], context).then(
 			(out) => `[${out.trim().split("\n").filter(Boolean).map((page) => page.slice(1, -1)).filter(Boolean).join(",")}]`,
 		),
-	) as { filename: string; previous_filename?: string | null }[];
-	const paths = files.flatMap((file) => [file.filename, ...(file.previous_filename ? [file.previous_filename] : [])]);
-	const touched = protectedMatches(paths, rules.protectedPaths);
-	if (touched.length > 0) reasons.push(`touches protected paths (human review needed): ${touched.join(", ")}`);
-
-	// Checks are read for the exact head commit that will be merged, never "the PR's latest".
-	const sha = pr.headRefOid;
-	const runs = (JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/check-runs?per_page=100`], context)) as { check_runs: CheckRun[] }).check_runs;
-	const statuses = (JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/status`], context)) as { statuses: { context: string; state: string }[] }).statuses;
-	const pending = [...runs.filter((r) => r.status !== "completed").map((r) => r.name), ...statuses.filter((s) => s.state === "pending").map((s) => s.context)];
-	const failed = [
-		...runs.filter((r) => r.status === "completed" && !["success", "skipped", "neutral"].includes(r.conclusion ?? "")).map((r) => r.name),
-		...statuses.filter((s) => s.state === "failure" || s.state === "error").map((s) => s.context),
-	];
-	// Only real CI runs count as passing: a commit status can be posted by anyone holding a token.
-	const passed = runs.filter((r) => r.status === "completed" && r.conclusion === "success" && r.app?.slug === "github-actions");
-	if (failed.length > 0) reasons.push(`failing checks: ${failed.join(", ")}`);
-	if (pending.length > 0) reasons.push(`checks still running: ${pending.join(", ")} (try again later)`);
-	if (rules.requireChecks && passed.length === 0) reasons.push("no passing GitHub Actions checks; repos without CI are never auto-merged");
-
-	// Cheap gates first: the model review runs only when everything else passed.
-	if (reasons.length === 0 && rules.requireAiReview) {
-		const diff = await gh(["api", `repos/${repo}/pulls/${number}`, "-H", "Accept: application/vnd.github.diff"], context);
-		const verdict = await review(pr, diff);
-		if (!verdict.approve) reasons.push(...verdict.reasons.map((reason) => `review: ${reason}`));
-	}
-	if (reasons.length > 0) return { result: { ok: false, reasons }, pr };
-	return {
-		result: { ok: true, summary: `${lines} lines in ${pr.changedFiles} files, ${passed.length} CI checks green on ${sha.slice(0, 7)}, review approved` },
-		pr,
+	) as RiskFile[];
+	const parsed = parsePrBody(pr.body ?? "");
+	const floor = riskFloor({ files, additions: pr.additions, deletions: pr.deletions, protectedPaths: rules.protectedPaths, newDependencies: false });
+	const tier = { tier: effectiveRisk(floor, parsed.risk), reasons: floor.reasons };
+	const needsHuman: string[] = [];
+	if (pr.isCrossRepository) needsHuman.push("PR comes from a fork");
+	if (pr.author.login !== (await viewerLogin(context))) needsHuman.push(`author ${pr.author.login} is not the daemon's account`);
+	if (pr.baseRefName !== base) needsHuman.push(`base is ${pr.baseRefName}, not ${base}`);
+	if (pr.changedFiles > rules.maxChangedFiles) needsHuman.push(`${pr.changedFiles} files > ${rules.maxChangedFiles}`);
+	if (pr.additions + pr.deletions > rules.maxChangedLines) needsHuman.push(`${pr.additions + pr.deletions} lines > ${rules.maxChangedLines}`);
+	const touched = protectedMatches(files.flatMap((f) => [f.filename, ...(f.previous_filename ? [f.previous_filename] : [])]), rules.protectedPaths);
+	if (touched.length > 0) needsHuman.push(`protected paths: ${touched.join(", ")}`);
+	if (parsed.missing.length > 0) needsHuman.push(`PR description is missing: ${parsed.missing.join(", ")}`);
+	if (parsed.testing?.ranNothing) needsHuman.push("Testing says nothing was run");
+	const reviewKey = `${repo}#${number}@${pr.headRefOid}`;
+	const review = (await reader.snapshot(Reviews, context))?.byHead[reviewKey];
+	const approval = (await reader.snapshot(Approvals, context))?.byPr[`${repo}#${number}`];
+	const state: PrTickState = {
+		state: pr.state as PrTickState["state"],
+		isDraft: pr.isDraft,
+		conflicts: pr.mergeable === "CONFLICTING",
+		behind: pr.mergeStateStatus === "BEHIND",
+		checks: await checksFor(repo, pr.headRefOid, context),
+		reviewDecision: pr.reviewDecision || null,
+		tier: tier.tier,
+		door: parsed.door ?? "one-way",
+		mergeAllowed: rules.repos.includes(repo) && pr.headRefName.startsWith(rules.branchPrefix),
+		...(review === undefined ? {} : { aiReview: review.approve, aiReviewReasons: review.reasons }),
+		// An approval covers only the exact commit Tony approved; any later push needs a new one.
+		humanApproved: approval?.sha === pr.headRefOid,
+		needsHuman,
 	};
+	return { pr, state, tier, parsed, reviewKey };
+}
+
+/** The factory's merge policy: every tier is reviewed; low and medium may auto-merge; high always needs Tony. */
+export const SHIP_OPTIONS: Partial<PrTickOptions> = {
+	autoMergeTiers: ["low", "medium"],
+	aiReviewTiers: ["low", "medium", "high"],
+	humanApprovalTiers: ["high"],
+	requireChecks: true,
+};
+
+export type TickOutcome = { decision: PrDecision; facts: ShipFacts; merged?: boolean; reviewed?: boolean };
+
+/**
+ * Advance a PR as far as the daemon itself can: run the independent review when due, merge when everything says
+ * merge (pinned to the head commit the review saw), and otherwise return the one next action for the agent.
+ */
+export async function tickPr(
+	repo: string,
+	number: number,
+	models: Models,
+	harnessLike: { snapshot: Harness["snapshot"]; commit: Harness["commit"] },
+	context: Context,
+	options: { allowMerge: boolean; session?: string },
+): Promise<TickOutcome> {
+	const policy = loadPolicy();
+	let facts = await gatherShipFacts(repo, number, policy, harnessLike, context);
+	let decision = decidePr(facts.state, SHIP_OPTIONS);
+	let reviewed = false;
+	if (decision.action === "review") {
+		const diff = await gh(["api", `repos/${repo}/pulls/${number}`, "-H", "Accept: application/vnd.github.diff"], context);
+		const verdict = await reviewWith(models, policy, context)(facts.pr, diff);
+		await harnessLike.commit(async (tx) => {
+			(await tx.doc(Reviews)).byHead[facts.reviewKey] = { ...verdict, at: Date.now() };
+		}, context);
+		audit("reviewed", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid, approve: verdict.approve, reasons: verdict.reasons });
+		reviewed = true;
+		facts = await gatherShipFacts(repo, number, policy, harnessLike, context);
+		decision = decidePr(facts.state, SHIP_OPTIONS);
+	}
+	if (decision.action === "merge" && options.allowMerge) {
+		const subject = `${facts.pr.title} (#${number})`;
+		await gh(
+			["pr", "merge", String(number), "--repo", repo, `--${policy.automerge.mergeMethod}`, "--subject", subject,
+				"--delete-branch", "--match-head-commit", facts.pr.headRefOid],
+			context,
+		);
+		audit("merged", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid, tier: facts.state.tier });
+		return { decision, facts, merged: true, reviewed };
+	}
+	if (decision.action === "park-human" || decision.action === "no-merge-authority") {
+		audit("parked", { session: options.session, repo, pr: number, action: decision.action, reason: decision.reason, details: decision.details });
+	}
+	return { decision, facts, reviewed };
+}
+
+export function describeTick(outcome: TickOutcome): string {
+	const { decision, facts, merged } = outcome;
+	const lines = [
+		merged ? `MERGED #${facts.pr.number} at ${facts.pr.headRefOid.slice(0, 7)} (tier ${facts.state.tier}).` : `Next action: ${decision.action}: ${decision.reason}`,
+		...(decision.details ?? []).map((d) => `  - ${d}`),
+		`Tier ${facts.state.tier}${facts.tier.reasons.length ? ` (${facts.tier.reasons.join("; ")})` : ""}, door ${facts.state.door}, review ${facts.state.aiReview === undefined ? "not run" : facts.state.aiReview ? "approved" : "rejected"}${facts.state.humanApproved ? ", human-approved" : ""}.`,
+	];
+	if (decision.waitSeconds) lines.push(`Wait about ${decision.waitSeconds}s, then call pr_tick again.`);
+	return lines.join("\n");
 }
 
 const REVIEW_PROMPT = `You are the last automated gate before a pull request is merged to the deploy branch with no human review.
@@ -659,13 +718,11 @@ export function reviewWith(models: Models, policy: Policy, context: Context) {
 	};
 }
 
-/** Every gate pr_merge would run, without merging, ignoring the allowlist: for trying a repo before enabling it. */
+/** Everything pr_tick would decide, including the review, without merging: for trying a repo before enabling it. */
 export async function dryRunGates(repo: string, number: number, models: Models, context: Context) {
-	const policy = loadPolicy();
-	const trial: Policy = { ...policy, automerge: { ...policy.automerge, repos: [...policy.automerge.repos, repo] } };
-	const { result } = await evaluateMergeGates(repo, number, trial, reviewWith(models, trial, context), context);
-	audit("gates_dry_run", { repo, pr: number, ok: result.ok, ...(result.ok ? {} : { reasons: result.reasons }) });
-	return { allowlisted: policy.automerge.repos.includes(repo), ...result };
+	const outcome = await tickPr(repo, number, models, harness(), context, { allowMerge: false });
+	audit("gates_dry_run", { repo, pr: number, action: outcome.decision.action, reason: outcome.decision.reason });
+	return { action: outcome.decision.action, text: describeTick(outcome) };
 }
 
 export const Git_ = defineExtension({
@@ -717,7 +774,7 @@ export const Git_ = defineExtension({
 			parameters: Type.Object({
 				branch: Type.String({ description: "Your committed work branch, e.g. pd/fix-typo" }),
 				title: Type.String(),
-				body: Type.String({ description: "What changed, why, and how it was tested" }),
+				body: Type.String({ description: "The filled-in PR template: Intent, Door, Cleanup, Why, Testing, System recap (Risk, Touches)" }),
 				draft: Type.Optional(Type.Boolean()),
 			}),
 			execute: async (args, api, context) => {
@@ -726,6 +783,10 @@ export const Git_ = defineExtension({
 				if (session === undefined) return fail("This conversation is not a named session.");
 				const repo = githubRepoOf(session.info.remote);
 				if (repo === undefined) return fail(`origin ${session.info.remote ?? "(none)"} is not a GitHub repo`);
+				const parsed = parsePrBody(args.body);
+				if (parsed.missing.length > 0) {
+					return fail(`The PR description is missing: ${parsed.missing.join(", ")}. Fill in this template:\n\n${PR_TEMPLATE}`);
+				}
 				try {
 					await pushWorkBranch(session.name, session.info, args.branch, false, context);
 					const base = await baseBranchOf(repo, policy, context);
@@ -772,42 +833,42 @@ export const Git_ = defineExtension({
 			},
 		}),
 		defineTool({
-			name: "pr_merge",
+			name: "pr_tick",
 			description:
-				"Request a merge of one of your PRs. Runs every safety gate (allowlisted repo, not a fork, your own work branch, CI green on the exact head commit, size limits, protected paths incl. renames, independent AI review) and merges only if all pass, pinned to that commit. Otherwise returns the reasons and leaves the PR open.",
-			parameters: Type.Object({
-				repo: Type.String({ description: "owner/repo" }),
-				number: Type.Number(),
-			}),
+				"Advance one of your PRs toward merge and get the ONE next action. The daemon gathers the real state (CI on the exact head commit, conflicts, reviews, risk tier computed from the diff, PR template), runs the independent review when due, and merges when every rule allows it. Otherwise it tells you what to do: fix-ci, wait-ci, address-review, resolve-conflicts, update-branch, mark-ready, park-human (leave it for Tony), no-merge-authority, or done. Call it again after acting until it says done or park-human.",
+			parameters: Type.Object({ number: Type.Number() }),
 			execute: async (args, api, context) => {
-				const policy = loadPolicy();
-				const { name } = await sessionCwd(api, api.conversationId, context);
-				const review = reviewWith(api.models, policy, context);
-				let gates: Awaited<ReturnType<typeof evaluateMergeGates>>;
+				const session = await sessionInfo(api, api.conversationId, context);
+				const repo = githubRepoOf(session?.info.remote);
+				if (session === undefined || repo === undefined) return fail("This session has no GitHub repo.");
 				try {
-					gates = await evaluateMergeGates(args.repo, args.number, policy, review, context);
+					const outcome = await tickPr(repo, args.number, api.models, { snapshot: api.snapshot.bind(api), commit: harness().commit.bind(harness()) }, context, { allowMerge: true, session: session.name });
+					if (!outcome.merged && outcome.decision.action === "park-human") {
+						const body = `🅿️ **pi-durable parked this PR for a human**\n\n${outcome.decision.reason}${(outcome.decision.details ?? []).map((d) => `\n- ${d}`).join("")}\n\nApprove the current head with \`pd approve ${repo} ${args.number}\`, or merge it yourself.`;
+						await gh(["pr", "comment", String(args.number), "--repo", repo, "--body", body], context).catch(() => undefined);
+					}
+					return outcome.merged ? text(describeTick(outcome)) : { ...text(describeTick(outcome)), isError: outcome.decision.action === "fix-ci" || outcome.decision.action === "address-review" };
 				} catch (error) {
-					audit("merge_error", { session: name, repo: args.repo, pr: args.number, error: String(error) });
-					return fail(`Could not evaluate the PR: ${String(error).slice(0, 500)}`);
+					audit("tick_error", { session: session.name, repo, pr: args.number, error: String(error).slice(0, 500) });
+					return fail(`pr_tick failed: ${String((error as { stderr?: string }).stderr || error).slice(0, 500)}`);
 				}
-				if (!gates.result.ok) {
-					audit("merge_refused", { session: name, repo: args.repo, pr: args.number, reasons: gates.result.reasons });
-					const body = `🛑 **pi-durable auto-merge held this PR**\n\n${gates.result.reasons.map((r) => `- ${r}`).join("\n")}`;
-					await gh(["pr", "comment", String(args.number), "--repo", args.repo, "--body", body], context).catch(() => undefined);
-					return fail(`Not merged. Gates that failed:\n- ${gates.result.reasons.join("\n- ")}`);
-				}
+			},
+		}),
+		defineTool({
+			name: "pr_merge",
+			description: "Same as pr_tick (kept for older prompts): advances the PR and merges only if every rule allows it.",
+			parameters: Type.Object({ repo: Type.Optional(Type.String()), number: Type.Number() }),
+			execute: async (args, api, context) => {
+				const session = await sessionInfo(api, api.conversationId, context);
+				const repo = githubRepoOf(session?.info.remote);
+				if (session === undefined || repo === undefined) return fail("This session has no GitHub repo.");
+				if (args.repo !== undefined && args.repo !== repo) return fail(`You can only merge PRs in your own repo (${repo}).`);
 				try {
-					await gh(
-						["pr", "merge", String(args.number), "--repo", args.repo, `--${policy.automerge.mergeMethod}`,
-							"--delete-branch", "--match-head-commit", gates.pr!.headRefOid],
-						context,
-					);
+					const outcome = await tickPr(repo, args.number, api.models, { snapshot: api.snapshot.bind(api), commit: harness().commit.bind(harness()) }, context, { allowMerge: true, session: session.name });
+					return outcome.merged ? text(describeTick(outcome)) : fail(describeTick(outcome));
 				} catch (error) {
-					audit("merge_failed", { session: name, repo: args.repo, pr: args.number, error: String(error) });
-					return fail(`Gates passed but the merge failed: ${String(error).slice(0, 500)}`);
+					return fail(`pr_merge failed: ${String((error as { stderr?: string }).stderr || error).slice(0, 500)}`);
 				}
-				audit("merged", { session: name, repo: args.repo, pr: args.number, sha: gates.pr!.headRefOid, summary: gates.result.summary });
-				return text(`Merged ${args.repo}#${args.number} (${gates.result.summary}).`);
 			},
 		}),
 	],
@@ -840,8 +901,8 @@ Ongoing goal: ${loop.goal}
 
 Advance this goal by one meaningful, reviewable step, then stop. Each iteration:
 1. Orient: check memory, git status, open PRs (\`pr_list\`, \`pr_status\`), CI results, and notes from the last iteration.
-2. If a previous PR of yours is open: get it green and through \`pr_merge\`, or address the gate reasons. Prefer finishing over starting.
-3. Otherwise pick the next step. Early on that may be conceptual work (a PLAN.md, a spike); later, implementation on a fresh \`${policy.automerge.branchPrefix}…\` branch from the latest deploy branch (call \`git_sync\` first), with tests, verified, and opened with \`pr_create\`.
+2. If a previous PR of yours is open: run the pr_tick loop on it first. Prefer finishing over starting.
+3. Otherwise pick the next step. Early on that may be conceptual work (a PLAN.md, a spike); later, implementation on a fresh \`${policy.automerge.branchPrefix}…\` branch from the latest deploy branch (call \`git_sync\` first), with tests, verified, opened with \`pr_create\`, then driven with \`pr_tick\`.
 4. Save what the next iteration needs to know with memory_save (project scope).
 5. Finish by calling loop_report with status "continue", "done" (goal fully achieved), or "blocked" (needs Tony), and a one-line note.`;
 }
