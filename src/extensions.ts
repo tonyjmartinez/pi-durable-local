@@ -1195,19 +1195,22 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				}, context);
 			if (loop === undefined || loop.status !== "active") return stop("done", loop?.note ?? "");
 			if (session === undefined) return stop("failed", `session ${loop.session} no longer exists`);
+			// The loop document is the source of truth for the iteration: a task created by resume starts its own
+			// checkpoint at 0, and must not replay (and re-count) iterations the loop already did.
+			const iteration = loop.iteration;
+			// A crash between submitting and checkpointing: this iteration already went out. Await it before any
+			// budget or gate check, so work that ran is always counted.
+			const already = await harness().commit((tx) => tx.submissionByRequest(session.conversationId as never, `loop:${loop.id}:${iteration}`), context);
+			if (already !== undefined) {
+				await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration } }), context);
+				return;
+			}
 			const spent = (await sessionCost(runtime, loop.session, session.conversationId, context)) - loop.costAtStart;
 			if (spent >= loop.budgetUsd) {
 				audit("loop_budget", { loop: loop.id, session: loop.session, note: `$${spent.toFixed(2)} of $${loop.budgetUsd}; resume with pd loop resume ${loop.id}` });
 				return stop("paused", `budget reached: $${spent.toFixed(2)} of $${loop.budgetUsd}`);
 			}
 			if (loop.iteration >= loop.maxIterations) return stop("done", `reached ${loop.maxIterations} iterations`);
-			// A crash between submitting and checkpointing: this iteration already went out, so don't gate it again.
-			const already = await harness().commit((tx) => tx.submissionByRequest(session.conversationId as never, `loop:${loop.id}:${task.state.checkpoint.iteration}`), context);
-			if (already !== undefined) {
-				await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration: task.state.checkpoint.iteration } }), context);
-				return;
-			}
-
 			// The cheap gate: decide from GitHub facts whether a model call is worth it at all.
 			const facts = await gateFacts(loop, session, policy, context).catch(() => undefined);
 			if (facts !== undefined) {
@@ -1228,7 +1231,6 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 
 			const conversation = await harness().conversation(session.conversationId as never, context);
 			if (conversation === undefined) return stop("failed", "conversation missing");
-			const iteration = task.state.checkpoint.iteration;
 			// The request ID makes a resubmission find the same submission, never a second one.
 			await conversation.submit(
 				{

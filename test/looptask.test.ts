@@ -1,0 +1,614 @@
+// LoopTask's phases (wait, run, await, abort) driven by a fake runtime and a fake harness: no daemon, no store.
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeEach, describe, it } from "node:test";
+import { UsageDoc } from "@earendil-works/pi-durable";
+import { makeFakeGh, makeStore, readAudit } from "./fakegh.helper.ts";
+
+const root = mkdtempSync(join(tmpdir(), "pd-loop-"));
+process.env.PD_DATA_DIR = join(root, "data");
+process.env.PD_CONFIG_DIR = join(root, "cfg");
+delete process.env.PD_NOTIFY_URL;
+mkdirSync(process.env.PD_DATA_DIR, { recursive: true });
+mkdirSync(process.env.PD_CONFIG_DIR, { recursive: true });
+const AUDIT = join(process.env.PD_DATA_DIR, "audit.jsonl");
+
+const gh = makeFakeGh(join(root, "fake"));
+const ext = await import("../src/extensions.ts");
+const { Loops, Sessions, Subagents } = await import("../src/state.ts");
+type Loop = import("../src/state.ts").Loop;
+
+const phases = ext.LoopTask.definition.phases as Record<"wait" | "run" | "await", (task: unknown, runtime: unknown, context: unknown) => Promise<unknown>>;
+const initial = ext.LoopTask.definition.initial as unknown as (input: { loopId: string }) => Record<string, unknown>;
+const abort = ext.LoopTask.definition.abort as (task: unknown, runtime: unknown, context: unknown) => Promise<unknown>;
+
+type Directive = { status: string; checkpoint?: Record<string, unknown>; outcome?: { status: string; result?: { iterations: number } } } | undefined;
+
+let store: ReturnType<typeof makeStore>;
+let usage: Record<number, unknown>;
+let submissions: Map<string, { id: number }>;
+let submits: { requestId: string; content: string; entry: { kind: string; data: Record<string, unknown> } }[];
+let settle: { status: string };
+let waits: number;
+let conversationExists: boolean;
+let directives: Directive[];
+let sleeps: { until: number; checkpoint: Record<string, unknown> }[];
+let failNextCommit: boolean;
+
+const cost = (total: number) => ({ models: { m: { cost: { total } } }, tools: {} });
+const context = {} as never;
+const task = (checkpoint: Record<string, unknown>) => ({ input: { loopId: "L1" }, state: { checkpoint } });
+const loopDoc = () => store.peek<{ byId: Record<string, Loop> }>(Loops).byId.L1;
+const events = () => readAudit(AUDIT);
+const near = (actual: number, expected: number, within = 5_000) => assert.ok(Math.abs(actual - expected) < within, `${actual} is not within ${within} of ${expected}`);
+
+const runtime = () => ({
+	snapshot: async (doc: unknown, ...rest: unknown[]) => (doc === UsageDoc ? usage[rest[0] as number] : store.snapshot(doc as never)),
+	commit: async (callback: (tx: { doc: (doc: never) => Promise<unknown> }) => unknown) => {
+		if (failNextCommit) {
+			failNextCommit = false;
+			throw new Error("process died before the checkpoint committed");
+		}
+		const directive = (await callback({ doc: async (doc) => store.peek(doc) })) as Directive;
+		directives.push(directive);
+		return directive;
+	},
+	sleepUntil: async (until: number, checkpoint: Record<string, unknown>) => {
+		sleeps.push({ until, checkpoint });
+	},
+});
+
+const baseLoop = (change: Partial<Loop> = {}): Loop => ({
+	id: "L1", session: "s1", goal: "Improve the thing", intervalMinutes: 60, maxIterations: 5, budgetUsd: 3, iteration: 0, status: "active",
+	note: "", createdAt: 0, nextRunAt: 1_000, costAtStart: 0, ...change,
+});
+
+function setup(options: { loop?: Partial<Loop> | null; remote?: string | null; session?: boolean } = {}) {
+	if (options.loop !== null) store.seed(Loops, { byId: { L1: baseLoop(options.loop) }, nextId: 2 });
+	const sessions = options.session === false ? {} : { s1: { conversationId: 1, cwd: "/work/r", purpose: "", createdAt: 0, ...(options.remote === null ? {} : { remote: options.remote ?? undefined }) } };
+	store.seed(Sessions, { byName: sessions });
+}
+
+beforeEach(() => {
+	store = makeStore();
+	usage = { 1: cost(0) };
+	submissions = new Map();
+	submits = [];
+	settle = { status: "done" };
+	waits = 0;
+	conversationExists = true;
+	directives = [];
+	sleeps = [];
+	failNextCommit = false;
+	writeFileSync(AUDIT, "");
+	gh.script([]);
+	let next = 100;
+	ext.setHarness({
+		commit: async (callback: (tx: unknown) => unknown) => callback({ submissionByRequest: async (conversation: number, requestId: string) => submissions.get(`${conversation}:${requestId}`) }),
+		conversation: async (id: number) =>
+			conversationExists
+				? {
+						submit: async (input: { requestId: string; content: string; entry: { kind: string; data: Record<string, unknown> } }) => {
+							submits.push({ requestId: input.requestId, content: input.content, entry: input.entry });
+							const key = `${id}:${input.requestId}`;
+							if (!submissions.has(key)) submissions.set(key, { id: next++ });
+							return submissions.get(key);
+						},
+					}
+				: undefined,
+		submission: async () => ({
+			wait: async () => {
+				waits++;
+				return settle;
+			},
+		}),
+	} as never);
+});
+
+const REMOTE = "git@github.com:o/r.git";
+const BASE_SHA = "b".repeat(40);
+const recent = () => new Date(Date.now() - 2 * 3_600_000).toISOString();
+
+/** Script the GitHub reads the loop gate makes. */
+function gate(options: { baseSha?: string; at?: string; prs?: { number: number; sha: string; branch?: string; check: "success" | "in_progress" | "failure" }[]; frictionIssues?: number; baseFails?: boolean } = {}) {
+	const prs = options.prs ?? [];
+	gh.script([
+		{ match: "^repo view o/r --json defaultBranchRef", responses: ["main\n"] },
+		{ match: "^api repos/o/r/commits/main --jq", responses: [options.baseFails ? { code: 1, stderr: "HTTP 502" } : JSON.stringify({ sha: options.baseSha ?? BASE_SHA, at: options.at ?? recent() })] },
+		{ match: "^api user --jq \\.login$", responses: ["factorybot\n"] },
+		{ match: "^pr list --repo o/r --author factorybot", responses: [JSON.stringify(prs.map((pr) => ({ number: pr.number, headRefOid: pr.sha, headRefName: pr.branch ?? "pd/x" })))] },
+		...prs.map((pr) => ({
+			match: `commits/${pr.sha}/check-runs`,
+			responses: [`${JSON.stringify({ name: "ci", status: pr.check === "in_progress" ? "in_progress" : "completed", conclusion: pr.check === "in_progress" ? null : pr.check, app: { slug: "github-actions" } })}\n`],
+		})),
+		{ match: "/status\\?per_page=100$", responses: [JSON.stringify({ statuses: [] })] },
+		{ match: "^issue list --repo o/r --label friction", responses: [`${options.frictionIssues ?? 0}\n`] },
+	]);
+}
+
+describe("the task definition", () => {
+	it("starts at the first iteration's run phase", () => {
+		assert.deepEqual(initial({ loopId: "L1" }), { phase: "run", iteration: 0 });
+		assert.equal(ext.LoopTask.definition.name, "pdl.loop");
+	});
+});
+
+describe("wait phase", () => {
+	it("sleeps until the loop is due, then runs the loop's current iteration", async () => {
+		setup({ loop: { nextRunAt: 123_456, iteration: 2 } });
+		await phases.wait(task({ phase: "wait" }), runtime(), context);
+		assert.deepEqual(sleeps, [{ until: 123_456, checkpoint: { phase: "run", iteration: 2 } }]);
+		assert.deepEqual(directives, []);
+	});
+
+	it("runs at once when no time was set", async () => {
+		setup({ loop: { nextRunAt: undefined } });
+		await phases.wait(task({ phase: "wait" }), runtime(), context);
+		near(sleeps[0]!.until, Date.now());
+	});
+
+	it("ends the task when the loop is no longer active, or gone", async () => {
+		for (const status of ["paused", "done", "failed"] as const) {
+			store = makeStore();
+			setup({ loop: { status, iteration: 4 } });
+			directives = [];
+			sleeps = [];
+			await phases.wait(task({ phase: "wait" }), runtime(), context);
+			assert.deepEqual(directives, [{ status: "terminal", outcome: { status: "completed", result: { iterations: 4 } } }], status);
+			assert.deepEqual(sleeps, []);
+		}
+		store = makeStore();
+		setup({ loop: null });
+		directives = [];
+		await phases.wait(task({ phase: "wait" }), runtime(), context);
+		assert.deepEqual(directives, [{ status: "terminal", outcome: { status: "completed", result: { iterations: 0 } } }]);
+	});
+});
+
+describe("abort", () => {
+	it("pauses an active loop and ends the task as aborted", async () => {
+		setup();
+		await abort(task({ phase: "wait" }), runtime(), context);
+		assert.equal(loopDoc()!.status, "paused");
+		assert.equal(loopDoc()!.note, "stopped");
+		assert.deepEqual(directives, [{ status: "terminal", outcome: { status: "aborted" } }]);
+	});
+
+	it("leaves a loop that is not active as it was", async () => {
+		setup({ loop: { status: "done", note: "stopped by user" } });
+		await abort(task({ phase: "wait" }), runtime(), context);
+		assert.equal(loopDoc()!.status, "done");
+		assert.equal(loopDoc()!.note, "stopped by user");
+		assert.equal(directives[0]!.outcome!.status, "aborted");
+	});
+
+	it("still ends the task when the loop was removed", async () => {
+		setup({ loop: null });
+		await abort(task({ phase: "wait" }), runtime(), context);
+		assert.equal(directives[0]!.outcome!.status, "aborted");
+	});
+});
+
+describe("run phase: when to stop", () => {
+	const run = (checkpoint: Record<string, unknown> = { phase: "run", iteration: 0 }) => phases.run(task(checkpoint), runtime(), context);
+
+	it("ends quietly when the loop is gone or not active", async () => {
+		setup({ loop: null });
+		await run();
+		assert.deepEqual(directives, [{ status: "terminal", outcome: { status: "completed", result: { iterations: 0 } } }]);
+		assert.equal(submits.length, 0);
+		directives = [];
+		setup({ loop: { status: "paused", note: "paused by user", iteration: 2 } });
+		await run();
+		assert.equal(loopDoc()!.status, "paused");
+		assert.equal(loopDoc()!.note, "paused by user");
+		assert.equal(directives[0]!.status, "terminal");
+		assert.equal(submits.length, 0);
+	});
+
+	it("fails the loop when its session is gone", async () => {
+		setup({ session: false });
+		await run();
+		assert.equal(loopDoc()!.status, "failed");
+		assert.equal(loopDoc()!.note, "session s1 no longer exists");
+		assert.equal(directives[0]!.status, "terminal");
+		assert.equal(submits.length, 0);
+	});
+
+	it("pauses at the budget and says so in the audit log", async () => {
+		setup();
+		usage[1] = cost(4);
+		await run();
+		assert.equal(loopDoc()!.status, "paused");
+		assert.equal(loopDoc()!.note, "budget reached: $4.00 of $3");
+		assert.equal(submits.length, 0);
+		const entry = events().find((event) => event.event === "loop_budget");
+		assert.match(String(entry?.note), /\$4\.00 of \$3; resume with pd loop resume L1/);
+	});
+
+	it("counts only spend since the loop started", async () => {
+		setup({ loop: { costAtStart: 10 } });
+		usage[1] = cost(12);
+		await run();
+		assert.equal(loopDoc()!.status, "active");
+		assert.equal(submits.length, 1);
+	});
+
+	it("counts the session's subagents against the budget", async () => {
+		setup();
+		usage[1] = cost(1);
+		usage[2] = cost(2.5);
+		store.seed(Subagents, { parentOf: { "2": "s1" } });
+		await run();
+		assert.equal(loopDoc()!.status, "paused");
+		assert.match(loopDoc()!.note, /\$3\.50 of \$3/);
+	});
+
+	it("measures the budget window the same way the loop starts it, subagents included", async () => {
+		setup({ loop: { costAtStart: 3.5 } });
+		usage[1] = cost(1);
+		usage[2] = cost(2.5);
+		store.seed(Subagents, { parentOf: { "2": "s1" } });
+		await run();
+		assert.equal(loopDoc()!.status, "active", "spend since the start is zero");
+		assert.equal(submits.length, 1);
+	});
+
+	it("does not count another session's subagents", async () => {
+		setup();
+		usage[2] = cost(100);
+		store.seed(Subagents, { parentOf: { "2": "other" } });
+		await run();
+		assert.equal(loopDoc()!.status, "active");
+	});
+
+	it("is done at the iteration cap", async () => {
+		setup({ loop: { iteration: 5, maxIterations: 5 } });
+		await run({ phase: "run", iteration: 5 });
+		assert.equal(loopDoc()!.status, "done");
+		assert.equal(loopDoc()!.note, "reached 5 iterations");
+		assert.equal(submits.length, 0);
+	});
+});
+
+describe("run phase: submitting an iteration", () => {
+	const run = (checkpoint: Record<string, unknown> = { phase: "run", iteration: 0 }) => phases.run(task(checkpoint), runtime(), context);
+
+	it("sends the prompt under a request id for this iteration, then checkpoints to await", async () => {
+		setup({ remote: null });
+		await run();
+		assert.equal(submits.length, 1);
+		assert.equal(submits[0]!.requestId, "loop:L1:0");
+		assert.deepEqual(submits[0]!.entry, { kind: "pdl.loop-tick", data: { loopId: "L1", iteration: 0 } });
+		assert.match(submits[0]!.content, /^\[loop L1, iteration 1\/5\]\nOngoing goal: Improve the thing/);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0 } }]);
+	});
+
+	it("uses the iteration from the checkpoint", async () => {
+		setup({ loop: { iteration: 2 }, remote: null });
+		await run({ phase: "run", iteration: 2 });
+		assert.equal(submits[0]!.requestId, "loop:L1:2");
+		assert.deepEqual(submits[0]!.entry.data, { loopId: "L1", iteration: 2 });
+		assert.match(submits[0]!.content, /iteration 3\/5/);
+	});
+
+	it("fails the loop when the conversation is gone", async () => {
+		setup({ remote: null });
+		conversationExists = false;
+		await run();
+		assert.equal(loopDoc()!.status, "failed");
+		assert.equal(loopDoc()!.note, "conversation missing");
+		assert.equal(submits.length, 0);
+	});
+
+	it("does not submit again after a crash between submitting and checkpointing", async () => {
+		setup({ remote: null });
+		failNextCommit = true;
+		await assert.rejects(run(), /process died/);
+		assert.equal(submits.length, 1);
+		assert.deepEqual(directives, [], "the checkpoint never committed");
+		// The phase reruns from its top with the same checkpoint.
+		await run();
+		assert.equal(submits.length, 1, "the iteration went out once");
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0 } }]);
+	});
+
+	it("goes straight to await for an iteration already sent, without gating it again", async () => {
+		setup({ loop: { kind: "cleanup", iteration: 1, lastRunAt: 1, lastSeenBaseSha: BASE_SHA }, remote: REMOTE });
+		gate({ baseSha: BASE_SHA });
+		submissions.set("1:loop:L1:1", { id: 7 });
+		await run({ phase: "run", iteration: 1 });
+		assert.equal(gh.calls().length, 0, "no GitHub reads for an iteration that is already out");
+		assert.equal(submits.length, 0);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 1 } }]);
+		assert.equal(loopDoc()!.skipped, undefined, "a gate that would have skipped did not run");
+	});
+
+	it("reattaches an in-flight iteration before checking the budget, so work that ran is counted", async () => {
+		setup({ remote: null });
+		usage[1] = cost(9);
+		submissions.set("1:loop:L1:0", { id: 7 });
+		await run();
+		assert.equal(loopDoc()!.status, "active");
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0 } }]);
+	});
+});
+
+describe("run phase: the skip gate", () => {
+	const run = (checkpoint: Record<string, unknown> = { phase: "run", iteration: 0 }) => phases.run(task(checkpoint), runtime(), context);
+
+	it("wakes a goal loop and remembers the base it saw", async () => {
+		setup({ remote: REMOTE });
+		gate();
+		await run();
+		assert.equal(submits.length, 1);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0, baseSha: BASE_SHA } }]);
+		assert.equal(loopDoc()!.lastSeenBaseSha, undefined, "recorded only once the iteration succeeds");
+	});
+
+	it("skips without a model call while every open PR is still running checks", async () => {
+		setup({ remote: REMOTE });
+		gate({ prs: [{ number: 3, sha: "c".repeat(40), check: "in_progress" }] });
+		const before = Date.now();
+		await run();
+		assert.equal(submits.length, 0);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "wait" } }]);
+		const loop = loopDoc()!;
+		assert.equal(loop.skipped, 1);
+		assert.equal(loop.note, "skipped: waiting for checks on 1 open PR");
+		near(loop.nextRunAt!, before + 5 * 60_000);
+		assert.equal(loop.iteration, 0);
+		assert.equal(loop.lastRunAt, undefined);
+		const skip = events().find((event) => event.event === "loop_skip");
+		assert.deepEqual([skip?.loop, skip?.nextCheckMinutes], ["L1", 5]);
+	});
+
+	it("counts each skip", async () => {
+		setup({ remote: REMOTE });
+		gate({ prs: [{ number: 3, sha: "c".repeat(40), check: "in_progress" }] });
+		await run();
+		await run();
+		assert.equal(loopDoc()!.skipped, 2);
+	});
+
+	it("wakes when an open PR needs work", async () => {
+		setup({ remote: REMOTE });
+		gate({ prs: [{ number: 3, sha: "c".repeat(40), check: "failure" }] });
+		await run();
+		assert.equal(submits.length, 1);
+	});
+
+	it("ignores PRs outside the work-branch prefix", async () => {
+		setup({ remote: REMOTE });
+		gate({ prs: [{ number: 3, sha: "c".repeat(40), branch: "feature/x", check: "in_progress" }] });
+		await run();
+		assert.equal(submits.length, 1, "a human's PR does not hold the loop");
+	});
+
+	it("skips a cleanup loop when the base branch has not moved since its last run", async () => {
+		setup({ loop: { kind: "cleanup", iteration: 1, lastRunAt: Date.now() - 3_600_000, lastSeenBaseSha: BASE_SHA }, remote: REMOTE });
+		gate({ baseSha: BASE_SHA });
+		await run({ phase: "run", iteration: 1 });
+		assert.equal(submits.length, 0);
+		assert.match(loopDoc()!.note, /no new commits on the base branch/);
+		near(loopDoc()!.nextRunAt!, Date.now() + 60 * 60_000);
+	});
+
+	it("wakes a cleanup loop when the base moved recently", async () => {
+		setup({ loop: { kind: "cleanup", iteration: 1, lastRunAt: Date.now() - 3 * 3_600_000, lastSeenBaseSha: "old" }, remote: REMOTE });
+		gate({ baseSha: BASE_SHA });
+		await run({ phase: "run", iteration: 1 });
+		assert.equal(submits.length, 1);
+		assert.equal((directives[0]!.checkpoint as { baseSha: string }).baseSha, BASE_SHA);
+	});
+
+	it("skips a cleanup loop when the base changed but has been idle past its window", async () => {
+		setup({ loop: { kind: "cleanup", skipIfIdleHours: 24, iteration: 1, lastRunAt: Date.now() - 5 * 86_400_000, lastSeenBaseSha: "old" }, remote: REMOTE });
+		gate({ baseSha: BASE_SHA, at: new Date(Date.now() - 3 * 86_400_000).toISOString() });
+		await run({ phase: "run", iteration: 1 });
+		assert.equal(submits.length, 0);
+		assert.match(loopDoc()!.note, /base branch idle/);
+	});
+
+	it("runs a cleanup loop's first iteration whatever the base is doing", async () => {
+		setup({ loop: { kind: "cleanup" }, remote: REMOTE });
+		gate({ baseSha: BASE_SHA, at: new Date(Date.now() - 90 * 86_400_000).toISOString() });
+		await run();
+		assert.equal(submits.length, 1);
+	});
+
+	it("wakes a friction sweep only when friction issues are open", async () => {
+		setup({ loop: { kind: "friction-sweep" }, remote: REMOTE });
+		gate({ frictionIssues: 0 });
+		await run();
+		assert.equal(submits.length, 0);
+		assert.equal(loopDoc()!.note, "skipped: no open friction issues");
+		gate({ frictionIssues: 3 });
+		await run();
+		assert.equal(submits.length, 1);
+	});
+
+	it("wakes anyway when GitHub cannot be read, with no base to remember", async () => {
+		setup({ remote: REMOTE });
+		gate({ baseFails: true });
+		await run();
+		assert.equal(submits.length, 1);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0 } }]);
+	});
+
+	it("does not gate a session whose origin is not GitHub", async () => {
+		setup({ remote: "https://example.com/r.git" });
+		gate({ prs: [{ number: 3, sha: "c".repeat(40), check: "in_progress" }] });
+		await run();
+		assert.equal(submits.length, 1);
+		assert.equal(gh.calls().length, 0);
+	});
+});
+
+describe("await phase", () => {
+	const wait = (checkpoint: Record<string, unknown>) => phases.await(task(checkpoint), runtime(), context);
+	const sent = (iteration = 0) => submissions.set(`1:loop:L1:${iteration}`, { id: 9 });
+
+	it("waits for the submission, counts the iteration, and schedules the next", async () => {
+		setup({ loop: { intervalMinutes: 30 } });
+		sent();
+		const before = Date.now();
+		await wait({ phase: "await", iteration: 0 });
+		assert.equal(waits, 1);
+		const loop = loopDoc()!;
+		assert.equal(loop.iteration, 1);
+		near(loop.lastRunAt!, before);
+		near(loop.nextRunAt!, before + 30 * 60_000);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "wait" } }]);
+	});
+
+	it("records the base commit it saw only when the iteration completed", async () => {
+		setup();
+		sent();
+		await wait({ phase: "await", iteration: 0, baseSha: BASE_SHA });
+		assert.equal(loopDoc()!.lastSeenBaseSha, BASE_SHA);
+	});
+
+	it("does not record it for a failed iteration, so it is tried again", async () => {
+		setup();
+		sent();
+		settle = { status: "unanswered" };
+		await wait({ phase: "await", iteration: 0, baseSha: BASE_SHA });
+		const loop = loopDoc()!;
+		assert.equal(loop.lastSeenBaseSha, undefined);
+		assert.equal(loop.iteration, 1, "the iteration still counts");
+		assert.equal(loop.note, "iteration 1 ended unanswered");
+	});
+
+	it("leaves lastSeenBaseSha alone when there was no base to record", async () => {
+		setup({ loop: { lastSeenBaseSha: "kept" } });
+		sent();
+		await wait({ phase: "await", iteration: 0 });
+		assert.equal(loopDoc()!.lastSeenBaseSha, "kept");
+	});
+
+	it("moves on when no submission was ever made", async () => {
+		setup();
+		await wait({ phase: "await", iteration: 0 });
+		assert.equal(waits, 0);
+		assert.equal(loopDoc()!.iteration, 1);
+		assert.equal(loopDoc()!.note, "iteration 1 ended without a submission");
+	});
+
+	it("moves on when the session is gone", async () => {
+		setup({ session: false });
+		sent();
+		await wait({ phase: "await", iteration: 0 });
+		assert.equal(waits, 0);
+		assert.equal(loopDoc()!.iteration, 1);
+	});
+
+	it("finishes the loop at the iteration cap", async () => {
+		setup({ loop: { iteration: 4, maxIterations: 5 } });
+		sent(4);
+		await wait({ phase: "await", iteration: 4 });
+		assert.equal(loopDoc()!.iteration, 5);
+		assert.equal(loopDoc()!.status, "done");
+		assert.equal(loopDoc()!.note, "reached 5 iterations");
+	});
+
+	it("keeps the reason a loop paused itself, while still counting the iteration", async () => {
+		setup({ loop: { status: "paused", note: "needs a decision from Tony" } });
+		sent();
+		settle = { status: "unanswered" };
+		await wait({ phase: "await", iteration: 0 });
+		assert.equal(loopDoc()!.status, "paused");
+		assert.equal(loopDoc()!.note, "needs a decision from Tony");
+		assert.equal(loopDoc()!.iteration, 1);
+	});
+
+	it("ends the task when the loop was removed", async () => {
+		setup({ loop: null });
+		sent();
+		await wait({ phase: "await", iteration: 3 });
+		assert.deepEqual(directives, [{ status: "terminal", outcome: { status: "completed", result: { iterations: 3 } } }]);
+	});
+});
+
+describe("whole iterations", () => {
+	/** Follow the task's own checkpoints, as the scheduler would, until it ends. */
+	async function drive(maxSteps = 40): Promise<string[]> {
+		const trace: string[] = [];
+		let checkpoint: Record<string, unknown> = initial({ loopId: "L1" });
+		for (let step = 0; step < maxSteps; step++) {
+			const phase = checkpoint.phase as "wait" | "run" | "await";
+			trace.push(phase);
+			directives = [];
+			sleeps = [];
+			await phases[phase](task(checkpoint), runtime(), context);
+			const directive = directives.at(-1);
+			if (directive?.status === "terminal") return trace;
+			if (directive?.status === "running") checkpoint = directive.checkpoint!;
+			else if (sleeps.length > 0) checkpoint = sleeps[0]!.checkpoint;
+			else throw new Error(`phase ${phase} neither checkpointed nor slept`);
+			// Skip the real sleep: the next iteration is due.
+			const loop = loopDoc();
+			if (loop !== undefined) loop.nextRunAt = 0;
+		}
+		throw new Error("the loop did not end");
+	}
+
+	it("runs every iteration once and finishes at the cap", async () => {
+		setup({ loop: { maxIterations: 3 }, remote: null });
+		const trace = await drive();
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:0", "loop:L1:1", "loop:L1:2"]);
+		assert.equal(loopDoc()!.iteration, 3);
+		assert.equal(loopDoc()!.status, "done");
+		assert.deepEqual(trace.slice(0, 4), ["run", "await", "wait", "run"]);
+		assert.equal(trace.at(-1), "wait");
+	});
+
+	it("survives a crash between submitting and checkpointing without losing or repeating the iteration", async () => {
+		setup({ loop: { maxIterations: 2 }, remote: null });
+		failNextCommit = true;
+		await assert.rejects(phases.run(task({ phase: "run", iteration: 0 }), runtime(), context), /process died/);
+		await drive();
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:0", "loop:L1:1"], "iteration 0 was submitted once, and counted");
+		assert.equal(loopDoc()!.iteration, 2);
+	});
+
+	it("does not lose the iteration when a skip-gated loop crashes mid-iteration", async () => {
+		// A cleanup loop whose gate would now say "skip": the rerun must still reattach to the iteration already sent.
+		setup({ loop: { kind: "cleanup", maxIterations: 5, iteration: 1, lastRunAt: Date.now() - 3 * 3_600_000, lastSeenBaseSha: "old" }, remote: REMOTE });
+		gate({ baseSha: BASE_SHA });
+		failNextCommit = true;
+		await assert.rejects(phases.run(task({ phase: "run", iteration: 1 }), runtime(), context), /process died/);
+		gate({ baseSha: "old" });
+		directives = [];
+		await phases.run(task({ phase: "run", iteration: 1 }), runtime(), context);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 1 } }]);
+		await phases.await(task({ phase: "await", iteration: 1 }), runtime(), context);
+		assert.equal(loopDoc()!.iteration, 2, "the crashed iteration was counted");
+		assert.equal(submits.length, 1);
+	});
+
+	// pd loop resume starts a NEW task, and a new task begins at its initial checkpoint (iteration 0). The run phase
+	// takes the iteration from that checkpoint, so a loop paused at iteration 3 would re-send iterations 0, 1 and 2:
+	// their request ids already exist, so each is a no-op that lasts one interval, until the count catches up.
+	it("a resumed loop carries on from its own iteration count, not from zero", async () => {
+		setup({ loop: { iteration: 3 }, remote: null });
+		for (const n of [0, 1, 2]) submissions.set(`1:loop:L1:${n}`, { id: n });
+		await phases.run(task(initial({ loopId: "L1" })), runtime(), context);
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:3"], "a new iteration is sent, not an old one reattached");
+		assert.match(submits[0]!.content, /iteration 4\/5/);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 3 } }]);
+	});
+
+	it("stops when the loop is paused between iterations", async () => {
+		setup({ loop: { maxIterations: 5 }, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		await phases.await(task({ phase: "await", iteration: 0 }), runtime(), context);
+		loopDoc()!.status = "paused";
+		directives = [];
+		await phases.wait(task({ phase: "wait" }), runtime(), context);
+		assert.equal(directives[0]!.status, "terminal");
+		assert.equal(submits.length, 1);
+	});
+});

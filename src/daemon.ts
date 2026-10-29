@@ -1,7 +1,7 @@
 // pdd: the one process that owns the pi-durable store. Every session, loop, and memory lives here; clients talk to it
 // over a Unix socket (HTTP + NDJSON event streams).
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, unlinkSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { connect } from "node:net";
@@ -24,7 +24,28 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
 import { dryRunGates, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
-import { type CleanupName, CLEANUP_PROMPTS, CLEANUP_SCHEDULE } from "./loopgate.ts";
+import {
+	applyLoopSettings,
+	applyResume,
+	assertApprovedHead,
+	assertResumable,
+	auditTail,
+	cloneArgs,
+	cloneEnv,
+	endLiveTask,
+	HttpError,
+	newLoop,
+	newMemory,
+	parseApproval,
+	parseRepo,
+	projectDir,
+	projectSessionName,
+	resolveLoopSpec,
+	sendMode,
+	stopPatch,
+	updateProjectPolicy,
+	validateSessionName,
+} from "./ops.ts";
 import { Approvals, audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -102,14 +123,6 @@ harness.closed.then((end) => {
 // ---------------------------------------------------------------------------------------------------------------
 // Operations shared by the HTTP routes.
 
-class HttpError extends Error {
-	readonly status: number;
-	constructor(status: number, message: string) {
-		super(message);
-		this.status = status;
-	}
-}
-
 async function sessionByName(name: string): Promise<{ conversation: Conversation; cwd: string }> {
 	const sessions = await harness.snapshot(Sessions, context);
 	const info = sessions?.byName[name];
@@ -120,8 +133,7 @@ async function sessionByName(name: string): Promise<{ conversation: Conversation
 }
 
 async function createSession(body: { name?: string; cwd?: string; purpose?: string; model?: string }) {
-	const name = String(body.name ?? "").trim();
-	if (!/^[a-z0-9][a-z0-9._-]{0,40}$/i.test(name)) throw new HttpError(400, "name: letters, digits, . _ - (max 41)");
+	const name = validateSessionName(body.name);
 	const cwd = resolve(body.cwd ?? process.env.HOME!);
 	if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new HttpError(400, `${cwd} is not a directory`);
 	const existing = await harness.snapshot(Sessions, context);
@@ -169,31 +181,17 @@ async function status() {
  * for it, and optionally start a loop on a goal.
  */
 async function startProject(body: { repo?: string; name?: string; purpose?: string; goal?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number; baseBranch?: string; merge?: boolean }) {
-	const repo = String(body.repo ?? "");
-	if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || repo.split("/").some((part) => part === "." || part === "..")) throw new HttpError(400, "repo must be owner/name");
-	const name = String(body.name ?? repo.split("/")[1]!.replace(/\.[a-z]+$/i, "")).toLowerCase();
-	if (!/^[a-z0-9][a-z0-9._-]{0,40}$/.test(name) || name.includes("..")) throw new HttpError(400, "invalid session name");
-	const root = loadPolicy().writableRoots[0]!.replace(/^~(?=\/|$)/, process.env.HOME!);
-	const dir = resolve(root, repo.split("/")[1]!);
+	const { repo, name: repoName } = parseRepo(body.repo);
+	const name = projectSessionName(repoName, body.name);
+	const dir = projectDir(loadPolicy().writableRoots[0]!, repoName, process.env.HOME!);
 	if (!existsSync(dir)) {
 		// Hooks off and no global config: nothing in the cloned repo runs with the daemon's credentials.
-		await run("git", ["-c", "core.hooksPath=/dev/null", "clone", "--quiet", `git@github.com:${repo}.git`, dir], {
-			env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" },
-		});
+		await run("git", cloneArgs(repo, dir), { env: cloneEnv(process.env) });
 		audit("cloned", { repo, dir });
 	}
-	if (body.baseBranch || body.merge) {
-		const policy = JSON.parse(readFileSync(POLICY_FILE, "utf8"));
-		policy.automerge ??= {};
-		// Where PRs for this repo should land, for repos whose GitHub default isn't the deploy branch.
-		if (body.baseBranch) policy.automerge.baseBranches = { ...policy.automerge.baseBranches, [repo]: body.baseBranch };
-		// The human running `pd factory --merge` is the approval; it is audited like any other.
-		if (body.merge) {
-			policy.automerge.repos = [...new Set([...(policy.automerge.repos ?? []), repo])];
-			audit("automerge_enabled", { repo, by: "pd factory --merge" });
-		}
-		writeFileSync(POLICY_FILE, `${JSON.stringify(policy, null, "\t")}\n`);
-	}
+	// The human running `pd factory --merge` is the approval; it is audited like any other.
+	const changed = updateProjectPolicy(POLICY_FILE, { repo, baseBranch: body.baseBranch, merge: body.merge });
+	if (changed?.mergeEnabled) audit("automerge_enabled", { repo, by: "pd factory --merge" });
 	const existing = (await harness.snapshot(Sessions, context))?.byName[name];
 	const session = existing === undefined ? await createSession({ name, cwd: dir, purpose: body.purpose ?? `${repo}` }) : { name, cwd: existing.cwd };
 	const loop = body.goal ? await startLoop({ session: name, goal: body.goal, intervalMinutes: body.intervalMinutes, maxIterations: body.maxIterations, budgetUsd: body.budgetUsd }) : undefined;
@@ -204,37 +202,13 @@ async function startLoop(body: { session?: string; goal?: string; preset?: strin
 	const policy = loadPolicy();
 	const { conversation } = await sessionByName(String(body.session ?? ""));
 	// A preset is one of the cleanup automations: its own brief, schedule, and idle gate.
-	const preset = body.preset === undefined ? undefined : (body.preset as CleanupName);
-	if (preset !== undefined && !(preset in CLEANUP_PROMPTS)) throw new HttpError(400, `unknown preset; one of ${Object.keys(CLEANUP_PROMPTS).join(", ")}`);
-	if (preset !== undefined) {
-		body.goal = CLEANUP_PROMPTS[preset];
-		body.intervalMinutes ??= CLEANUP_SCHEDULE[preset].intervalMinutes;
-	}
-	if (!body.goal) throw new HttpError(400, "goal is required");
+	const spec = resolveLoopSpec(body);
 	// The budget window starts at the session's spend including its subagents, the same measure the loop checks.
 	const costAtStart = await sessionCost(harness, String(body.session), conversation.id, context);
-	const clamp = (value: number | undefined, min: number, max: number) => (value === undefined || !Number.isFinite(value) ? undefined : Math.min(Math.max(value, min), max));
-	body.intervalMinutes = clamp(body.intervalMinutes, 5, 60 * 24 * 30);
-	body.maxIterations = clamp(body.maxIterations, 1, 1000);
-	body.budgetUsd = clamp(body.budgetUsd, 0.01, 1000);
 	return conversation.commit(async (tx) => {
 		const loops = await tx.doc(Loops);
 		const id = `L${loops.nextId++}`;
-		const loop: Loop = {
-			id,
-			session: body.session!,
-			goal: body.goal!,
-			intervalMinutes: body.intervalMinutes ?? policy.loops.defaultIntervalMinutes,
-			maxIterations: body.maxIterations ?? policy.loops.defaultMaxIterations,
-			budgetUsd: body.budgetUsd ?? policy.loops.defaultBudgetUsd,
-			iteration: 0,
-			status: "active",
-			note: "",
-			createdAt: Date.now(),
-			nextRunAt: Date.now(),
-			costAtStart,
-			...(preset === undefined ? {} : { kind: CLEANUP_SCHEDULE[preset].kind, ...(CLEANUP_SCHEDULE[preset].skipIfIdleHours ? { skipIfIdleHours: CLEANUP_SCHEDULE[preset].skipIfIdleHours } : {}) }),
-		};
+		const loop = newLoop({ id, session: body.session!, spec, defaults: policy.loops, costAtStart, now: Date.now() });
 		// Background: the loop must not keep the session "busy" or die when someone presses Esc on a run.
 		loop.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true });
 		loops.byId[id] = loop;
@@ -248,50 +222,24 @@ async function setLoopStatus(id: string, action: string) {
 	if (loop === undefined) throw new HttpError(404, `no loop ${id}`);
 	if (action === "pause" || action === "stop") {
 		await harness.commit(async (tx) => {
-			const current = (await tx.doc(Loops)).byId[id]!;
-			current.status = action === "stop" ? "done" : "paused";
-			current.note = action === "stop" ? "stopped by user" : "paused by user";
+			Object.assign((await tx.doc(Loops)).byId[id]!, stopPatch(action));
 		}, context);
-		if (loop.taskId !== undefined) {
-			const task = await harness.getTask(loop.taskId as never, context);
-			if (task !== undefined && task.state.status !== "terminal") await harness.abortTask(loop.taskId as never, context);
-		}
+		await endLiveTask(harness, loop.taskId, context, { wait: false });
 	} else if (action === "resume") {
-		if (loop.status === "active") throw new HttpError(409, `loop ${id} is already active`);
+		assertResumable(loop);
 		const { conversation } = await sessionByName(loop.session);
 		// A loop paused by its own report may still have a live task waiting to notice; end it so only one runs.
-		if (loop.taskId !== undefined) {
-			const task = await harness.getTask(loop.taskId as never, context);
-			if (task !== undefined && task.state.status !== "terminal") {
-				await harness.abortTask(loop.taskId as never, context);
-				await harness.waitForTask(loop.taskId as never, context);
-			}
-		}
+		await endLiveTask(harness, loop.taskId, context, { wait: true });
 		// A resumed loop gets a fresh budget window, measured the same way the loop measures spend.
 		const cost = await sessionCost(harness, loop.session, conversation.id, context);
 		await conversation.commit(async (tx) => {
 			const current = (await tx.doc(Loops)).byId[id]!;
-			Object.assign(current, { status: "active", note: "resumed", nextRunAt: Date.now() });
-			current.costAtStart = cost;
+			applyResume(current, cost, Date.now());
 			current.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true });
 		}, context);
 	} else throw new HttpError(400, `unknown action ${action}`);
 	audit(`loop_${action}`, { loop: id });
 	return (await harness.snapshot(Loops, context))?.byId[id];
-}
-
-/** The last `count` audit entries, reading only the end of the file and skipping torn lines. */
-function auditTail(count: number): unknown[] {
-	const size = statSync(AUDIT_LOG).size;
-	const start = Math.max(0, size - 512 * 1024);
-	const text = readFileSync(AUDIT_LOG).subarray(start).toString("utf8");
-	return text.split("\n").slice(start > 0 ? 1 : 0).filter(Boolean).slice(-count).flatMap((line) => {
-		try {
-			return [JSON.parse(line)];
-		} catch {
-			return [];
-		}
-	});
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -342,7 +290,7 @@ const routes: [string, RegExp, Route][] = [
 	}],
 	["POST", /^\/sessions\/([^/]+)\/send$/, async (m, body) => {
 		const { conversation } = await sessionByName(m[1]!);
-		const mode = body.mode === "steer" ? "steer" : "followUp";
+		const mode = sendMode(body);
 		const submission = await conversation.submit({ type: "input", content: String(body.text ?? ""), whenBusy: mode }, context);
 		return { submission: submission.id };
 	}],
@@ -370,15 +318,7 @@ const routes: [string, RegExp, Route][] = [
 		harness.commit(async (tx) => {
 			const memories = await tx.doc(Memories);
 			const id = String(memories.nextId++);
-			memories.items[id] = {
-				id,
-				topic: String(body.topic ?? "note"),
-				text: String(body.text ?? ""),
-				tags: [],
-				by: "tony",
-				updatedAt: Date.now(),
-				...(typeof body.project === "string" ? { project: resolve(body.project) } : {}),
-			};
+			memories.items[id] = newMemory(body, id, Date.now());
 			// Drafts expire with the commit; hand back a plain copy.
 			return JSON.parse(JSON.stringify(memories.items[id]));
 		}, context)],
@@ -396,12 +336,8 @@ const routes: [string, RegExp, Route][] = [
 		const updated = await harness.commit(async (tx) => {
 			const loop = (await tx.doc(Loops)).byId[id];
 			if (loop === undefined) return undefined;
-			if (typeof body.intervalMinutes === "number" && body.intervalMinutes >= 5) {
-				loop.intervalMinutes = body.intervalMinutes;
-				// Takes effect after the iteration already scheduled.
-			}
-			if (typeof body.maxIterations === "number" && body.maxIterations >= 1) loop.maxIterations = body.maxIterations;
-			if (typeof body.budgetUsd === "number" && body.budgetUsd > 0) loop.budgetUsd = body.budgetUsd;
+			// A new interval takes effect after the iteration already scheduled.
+			applyLoopSettings(loop, body);
 			return JSON.parse(JSON.stringify(loop)) as Loop;
 		}, context);
 		if (updated === undefined) throw new HttpError(404, `no loop ${id}`);
@@ -410,13 +346,9 @@ const routes: [string, RegExp, Route][] = [
 	}],
 	["POST", /^\/loops\/([^/]+)\/(pause|resume|stop)$/, (m) => setLoopStatus(m[1]!, m[2]!)],
 	["POST", /^\/approve$/, async (_m, body) => {
-		const repo = String(body.repo);
-		const number = Number(body.number);
-		const expected = String(body.sha ?? "").toLowerCase();
-		if (!/^[0-9a-f]{7,40}$/.test(expected)) throw new HttpError(400, "pass the commit you reviewed: pd approve <repo> <pr> <sha7> (shown in the park comment)");
+		const { repo, number, expected } = parseApproval(body);
 		const sha = (await run("gh", ["pr", "view", String(number), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"])).stdout.trim();
-		// The approval binds the commit Tony saw; if the agent pushed since, he must look again.
-		if (!sha.startsWith(expected)) throw new HttpError(409, `PR head is now ${sha.slice(0, 7)}, not ${expected}; review the new commit first`);
+		assertApprovedHead(sha, expected);
 		await harness.commit(async (tx) => {
 			(await tx.doc(Approvals)).byPr[`${repo}#${number}`] = { sha, at: Date.now() };
 		}, context);
@@ -429,7 +361,7 @@ const routes: [string, RegExp, Route][] = [
 		return { retried: m[1] };
 	}],
 	["GET", /^\/audit$/, async () =>
-		existsSync(AUDIT_LOG) ? auditTail(200) : []],
+		existsSync(AUDIT_LOG) ? auditTail(AUDIT_LOG, 200) : []],
 ];
 
 const server = createServer(async (request, response) => {
