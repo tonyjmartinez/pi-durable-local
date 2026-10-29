@@ -66,7 +66,7 @@ const BOLD = "(?:\\*\\*|__)";
 const ALL_NAMES = Object.values(SECTION_NAMES).join("|");
 const HEADING = new RegExp(`^\\s{0,3}#{1,6}\\s*${BOLD}?(${ALL_NAMES})${BOLD}?\\b[ \\t]*:?[ \\t]*(.*)$`, "i");
 // `Door: x`, `**Door:** x`, `**Door** x`, `- Door: x`; bare prose that merely starts with a name does not match.
-const LABEL = new RegExp(`^\\s*(?:[-*+]\\s+)?${BOLD}?(${ALL_NAMES})(?:[ \\t]*:[ \\t]*${BOLD}?|${BOLD}[ \\t]*:?)[ \\t]*(.*)$`, "i");
+const LABEL = new RegExp(`^\\s*(?:(?:[-*+]|\\d+[.)])\\s+)?${BOLD}?(${ALL_NAMES})(?:[ \\t]*:[ \\t]*${BOLD}?|${BOLD}[ \\t]*:?)[ \\t]*(.*)$`, "i");
 
 function sectionOf(name: string): Section {
 	const lower = name.toLowerCase();
@@ -103,7 +103,8 @@ function parseTouches(text: string): { area: string; kind: TouchKind }[] {
 	if (start === null) return out;
 	// Everything after "Touches:" up to the next labelled line, so wrapped and bulleted lists both work.
 	const rest = clean.slice(start.index + start[0].length).split(/\n\s*\n|\n\s*(?:risk|door|cleanup)\b/i)[0]!;
-	for (const match of rest.matchAll(/([^;()\n]+?)\s*[([]\s*(composes|extends|adds)\s*[)\]]/gi)) {
+	// A kind in parentheses or brackets, optionally followed by a reason: (composes), (composes: why), (extends - why).
+	for (const match of rest.matchAll(/([^;()\n]+?)\s*[([]\s*(composes|extends|adds)\b(?:\s*[:;,.\-\u2013\u2014][^)\]\n]*)?\s*[)\]]/gi)) {
 		const area = match[1]!.replace(/^[\s,;\-*+•]+|^and\s+/gi, "").replace(/[\s*_`]+$/g, "").trim();
 		if (area !== "") out.push({ area, kind: match[2]!.toLowerCase() as TouchKind });
 	}
@@ -118,8 +119,35 @@ function parseTouches(text: string): { area: string; kind: TouchKind }[] {
 
 const NOTHING_RAN = /^(?:none|n\/a|na|nothing|untested|not (?:run|tested|yet)|did(?: not|n'?t) (?:run|test)|no tests?(?: (?:run|added))?|tbd|todo|-+)\.?$/i;
 
+const LABEL_NAMES = ["Intent", "Door", "Cleanup", "Why", "Testing", "Risk", "Touches"];
+/** These words are rare enough in prose that a capitalised `Door:` is always a label, wherever it sits on the line. */
+const ALWAYS_LABELS = new Set(["Door", "Cleanup", "Risk", "Touches"]);
+
+/**
+ * Agents often write `Intent: x. Door: two-way. Cleanup: none.` on one line. Put each label on its own line, outside
+ * code fences, when it follows a sentence end or is one of the words that is nearly always a label.
+ */
+function splitInlineLabels(text: string): string {
+	let fenced = false;
+	const label = new RegExp(`[ \\t]+(?=${BOLD}?(${LABEL_NAMES.join("|")})${BOLD}?[ \\t]*:)`, "g");
+	return text
+		.split("\n")
+		.map((line) => {
+			if (/^\s*(?:```|~~~)/.test(line)) fenced = !fenced;
+			if (fenced) return line;
+			return line.replace(label, (space, name: string, offset: number) => {
+				const before = line.slice(0, offset).trimEnd();
+				// Already first on its line, or right after a list marker: nothing to split.
+				if (before === "" || /^(?:[-*+]|\d+[.)])$/.test(before)) return space;
+				const sentenceEnd = /[.;!?)\]*_`]$/.test(before);
+				return before !== "" && (sentenceEnd || ALWAYS_LABELS.has(name)) ? "\n" : space;
+			});
+		})
+		.join("\n");
+}
+
 export function parsePrBody(body: string): ParsedPr {
-	const text = body.replace(/\r\n?/g, "\n").replace(/<!--[\s\S]*?-->/g, "");
+	const text = splitInlineLabels(body.replace(/\r\n?/g, "\n").replace(/<!--[\s\S]*?-->/g, ""));
 	const sections: Partial<Record<Section, string[]>> = {};
 	let current: Section | undefined;
 	let fenced = false;
@@ -196,11 +224,18 @@ function labelValue(text: string, label: string): string | undefined {
 
 const excerpt = (value: string, max = 50) => (value.length > max ? `${value.slice(0, max - 1).trimEnd()}…` : value);
 
-/** The area as the agent wrote it, without its commentary, backticks or the rest of the sentence. */
+/**
+ * The area as the agent wrote it, without its commentary, backticks or the rest of the sentence, cut at a word
+ * boundary and never with an ellipsis: it goes into an example the agent will copy.
+ */
 function areaOf(given: string): string {
 	const plain = given.replace(/[`*_]/g, "");
 	const cut = (plain.split(/\s*\(|\.\s|\s[-\u2013\u2014]\s|;/)[0] ?? plain).trim().replace(/[.,]+$/, "");
-	return excerpt(cut === "" ? plain.trim() : cut, 40);
+	const area = cut === "" ? plain.trim() : cut;
+	if (area.length <= 40) return area;
+	const clipped = area.slice(0, 40);
+	const space = clipped.lastIndexOf(" ");
+	return (space > 10 ? clipped.slice(0, space) : clipped).replace(/[\s,.;:\-]+$/, "");
 }
 
 function doorHint(given: string): string {
@@ -222,9 +257,10 @@ function touchesHint(given: string | undefined): string {
 		return "Add `Touches: <area> (composes|extends|adds)` under `## System recap`, e.g. `Touches: parser (composes)`.";
 	}
 	const area = areaOf(given);
-	const kind = /\(\s*([A-Za-z-]+)\s*\)\s*[.;]?\s*$/.exec(given)?.[1];
-	if (kind !== undefined) return `Touches kind must be composes, extends or adds, not "(${kind})". Example: \`Touches: ${area} (composes)\`.`;
-	return `Touches needs a kind in parentheses after the area: composes (uses existing pieces), extends (changes one) or adds (a new piece). Example: \`Touches: ${area} (composes)\`.`;
+	// A final parenthesis whose first word is not a kind: (modifies), (modifies: why).
+	const wrong = /\(\s*([A-Za-z-]+)\s*(?:[:;,.\-\u2013\u2014][^)]*)?\)\s*[.;]?\s*$/.exec(given)?.[1];
+	if (wrong !== undefined) return `Touches kind must be composes, extends or adds, not "(${wrong})". Example: \`Touches: ${area} (composes)\`.`;
+	return `The Touches line must contain a kind in parentheses: (composes|extends|adds). A reason may follow it inside, as in \`(composes: reuses the existing pattern)\`. Example: \`Touches: ${area} (composes)\`.`;
 }
 
 /** The hints as lines for an error message, in field order: `- touches: ...`. Empty when there are none. */

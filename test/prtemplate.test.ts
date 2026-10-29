@@ -263,7 +263,7 @@ describe("hints", () => {
 
 	it("tell the agent how to fix a Touches line that has no kind, using its own area", () => {
 		const hint = hintsOf(body("- Risk: low. Content text only.\n- Touches: `src/content/plants/ponytail-palm.md` (the fun-fact line only). Rendered on `/plants/ponytail-palm/`.")).touches!;
-		assert.match(hint, /needs a kind in parentheses/);
+		assert.match(hint, /must contain a kind in parentheses: \(composes\|extends\|adds\)/);
 		assert.match(hint, /Touches: src\/content\/plants\/ponytail-palm\.md \(composes\)/);
 		assert.ok(!hint.includes("``"), "no nested backticks in the example");
 	});
@@ -350,10 +350,148 @@ describe("formatHints", () => {
 	it("prints only the field that needs fixing", () => {
 		const text = formatHints(parsePrBody(FILLED.replace("Touches: pr_merge (composes)", "Touches: pr_merge")));
 		assert.equal(text.split("\n").length, 1);
-		assert.match(text, /^- touches: Touches needs a kind in parentheses/);
+		assert.match(text, /^- touches: The Touches line must contain a kind in parentheses/);
 	});
 
 	it("is empty when there are no hints", () => {
 		assert.equal(formatHints({ hints: {} }), "");
+	});
+});
+
+describe("a kind with a reason (friction issue #1)", () => {
+	const withTouches = (line: string) => `## Intent\n\nFix.\n\nDoor: two-way\n\n## Why\n\nBecause.\n\n## Testing\n\nRan npm test.\n\n## System recap\n\nRisk: low\n${line}\n`;
+	const touches = (line: string) => parsePrBody(withTouches(line));
+
+	it("accepts the exact line from the issue", () => {
+		const parsed = touches("Touches: plant content tests, tests/plants.test.ts (composes: reuses the file's existing pattern; no runtime change)");
+		assert.deepEqual(parsed.missing, []);
+		assert.deepEqual(parsed.touches, [{ area: "plant content tests, tests/plants.test.ts", kind: "composes" }]);
+	});
+
+	it("accepts a reason after a colon, dash, em dash, semicolon, comma or full stop", () => {
+		for (const separator of [":", " -", " –", " —", ";", ",", "."]) {
+			const parsed = touches(`Touches: the parser (extends${separator} it now handles quotes)`);
+			assert.deepEqual(parsed.touches, [{ area: "the parser", kind: "extends" }], JSON.stringify(separator));
+			assert.deepEqual(parsed.missing, []);
+		}
+	});
+
+	it("accepts any kind, any case, and square brackets", () => {
+		assert.equal(touches("Touches: a (adds: a new file)").touches![0]!.kind, "adds");
+		assert.equal(touches("Touches: a (Composes: reason)").touches![0]!.kind, "composes");
+		assert.equal(touches("Touches: a [extends: reason]").touches![0]!.kind, "extends");
+		assert.equal(touches("Touches: a ( composes : spaced )").touches![0]!.kind, "composes");
+	});
+
+	it("still accepts a bare kind, and a reason that contains parentheses", () => {
+		assert.deepEqual(touches("Touches: a (composes)").touches, [{ area: "a", kind: "composes" }]);
+		assert.deepEqual(touches("Touches: a (composes: uses foo (bar))").touches, [{ area: "a", kind: "composes" }]);
+	});
+
+	it("reads several areas, each with its own reason", () => {
+		const parsed = touches("Touches: guard (extends: new rule); audit log (adds: new event)");
+		assert.deepEqual(parsed.touches, [{ area: "guard", kind: "extends" }, { area: "audit log", kind: "adds" }]);
+		const bulleted = touches("Touches:\n- guard (extends: new rule)\n- audit log (adds - new event)");
+		assert.deepEqual(bulleted.touches, [{ area: "guard", kind: "extends" }, { area: "audit log", kind: "adds" }]);
+	});
+
+	it("does not take a reason for the kind, nor a made-up kind for a real one", () => {
+		assert.deepEqual(touches("Touches: parser (the fun-fact line only)").missing, ["touches"]);
+		assert.deepEqual(touches("Touches: parser (modifies: it now handles quotes)").missing, ["touches"]);
+		assert.deepEqual(touches("Touches: parser (composesx)").missing, ["touches"]);
+	});
+
+	describe("the hint", () => {
+		it("says the line must contain (composes|extends|adds), allows a reason, and shows a complete line", () => {
+			const hint = touches("Touches: parser (the fun-fact line only)").hints.touches!;
+			assert.match(hint, /must contain a kind in parentheses: \(composes\|extends\|adds\)/);
+			assert.match(hint, /A reason may follow it inside, as in `\(composes: reuses the existing pattern\)`/);
+			assert.match(hint, /Example: `Touches: parser \(composes\)`\.$/);
+		});
+
+		it("never truncates the example, however long the area was", () => {
+			const long = "a very long description of the area that goes on and on and on for quite a while longer";
+			for (const line of [`Touches: ${long} (the tests)`, `Touches: ${long}`, `Touches: ${long} (modifies: why)`]) {
+				const hint = touches(line).hints.touches!;
+				assert.ok(!hint.includes("…") && !hint.includes("..."), hint);
+				const example = /Example: `(Touches: [^`]+)`/.exec(hint)?.[1];
+				assert.ok(example, hint);
+				assert.match(example, /^Touches: .{1,40} \(composes\)$/, "a complete line that ends in the kind");
+				assert.ok(long.startsWith(example.slice("Touches: ".length, -" (composes)".length)), "the area is a whole-word prefix of what was written");
+			}
+		});
+
+		it("cuts the area at a word, not in the middle of one", () => {
+			const hint = touches(`Touches: ${"abcdefghij ".repeat(8)}(nothing)`).hints.touches!;
+			assert.match(hint, /Example: `Touches: (?:abcdefghij ?)+ \(composes\)`/);
+		});
+
+		it("stays one short line, even for a wrong kind with a reason", () => {
+			const hint = touches("Touches: parser (modifies: because the old way was wrong)").hints.touches!;
+			assert.match(hint, /not "\(modifies\)"/);
+			assert.ok(!hint.includes("\n") && hint.length < 300, String(hint.length));
+		});
+	});
+});
+
+describe("labels that share a line", () => {
+	it("reads every field from a body written as one paragraph", () => {
+		const parsed = parsePrBody("Intent: Fix the parser. Door: two-way. Cleanup: none. Why: it dropped a token. Testing: ran npm test, 10 passing. Risk: low. Touches: parser (composes: existing code)");
+		assert.deepEqual(parsed.missing, []);
+		assert.equal(parsed.intent, "Fix the parser.");
+		assert.equal(parsed.door, "two-way");
+		assert.equal(parsed.cleanup, "none.");
+		assert.equal(parsed.why, "it dropped a token.");
+		assert.match(parsed.testing!.text, /ran npm test, 10 passing\./);
+		assert.equal(parsed.risk, "low");
+		assert.deepEqual(parsed.touches, [{ area: "parser", kind: "composes" }]);
+	});
+
+	it("splits Door and Cleanup after a sentence, a parenthesis, or with no punctuation at all", () => {
+		for (const line of ["Fix it. Door: two-way. Cleanup: none.", "Fix it. Door: two-way (easy to revert) Cleanup: none", "Fix it (small) Door: two-way Cleanup: none", "Fix it Door: two-way Cleanup: none"]) {
+			const parsed = parsePrBody(`## Intent\n${line}`);
+			assert.equal(parsed.door, "two-way", line);
+			assert.match(parsed.cleanup ?? "", /^none/, line);
+			assert.ok(!parsed.intent!.includes("Door"), `${line} -> ${parsed.intent}`);
+		}
+	});
+
+	it("takes the Door from its own label, not from the words after the next one", () => {
+		const parsed = parsePrBody("## Intent\nFix it. Door: one-way. Cleanup: none (the two-way cleanup is done)");
+		assert.equal(parsed.door, "one-way");
+	});
+
+	it("handles bold labels on one line", () => {
+		const parsed = parsePrBody("**Intent:** Fix it. **Door:** two-way. **Why:** because. **Testing:** ran tests. **Risk:** low. **Touches:** a (adds)");
+		assert.deepEqual(parsed.missing, []);
+		assert.equal(parsed.door, "two-way");
+	});
+
+	it("does not split a bullet from its label", () => {
+		const parsed = parsePrBody("**Intent:** Fix the parser\n- **Door:** one-way\n1. Cleanup: needed (#12)\n* Why: because");
+		assert.equal(parsed.intent, "Fix the parser");
+		assert.equal(parsed.door, "one-way");
+		assert.equal(parsed.cleanup, "needed (#12)");
+		assert.equal(parsed.why, "because");
+	});
+
+	it("leaves prose, lowercase words and code fences alone", () => {
+		const prose = parsePrBody("## Intent\nWe walk through the door: it is closed. Why not. Testing is hard.");
+		assert.equal(prose.door, undefined);
+		assert.equal(prose.intent, "We walk through the door: it is closed. Why not. Testing is hard.");
+		const fenced = parsePrBody("## Testing\n```\nran it. Door: one-way. Risk: high\n```\nnpm test passed");
+		assert.equal(fenced.door, undefined);
+		assert.match(fenced.testing!.text, /Door: one-way/);
+	});
+
+	it("does not mistake the first capitalised word of a sentence for a label", () => {
+		const parsed = parsePrBody("## Why\nIt dropped a token. Testing showed it on every input.");
+		assert.equal(parsed.why, "It dropped a token. Testing showed it on every input.");
+		assert.equal(parsed.testing, undefined);
+	});
+
+	it("keeps the template and the usual layouts parsing as before", () => {
+		assert.deepEqual(parsePrBody(PR_TEMPLATE).missing, ["intent", "door", "why", "testing", "risk", "touches"]);
+		assert.deepEqual(parsePrBody(FILLED).missing, []);
 	});
 });
