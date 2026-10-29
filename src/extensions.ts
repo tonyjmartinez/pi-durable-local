@@ -21,6 +21,7 @@ import {
 	UsageDoc,
 } from "@earendil-works/pi-durable";
 import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
+import { type GatePr, type GateRepo, shouldWake } from "./loopgate.ts";
 import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, type FrictionInput, frictionFromAudit } from "./friction.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
 import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
@@ -1009,6 +1010,28 @@ Advance this goal by one meaningful, reviewable step, then stop. Each iteration:
 
 type LoopCheckpoint = { phase: "wait" } | { phase: "run"; iteration: number };
 
+/** What the loop gate needs, from GitHub via the daemon's gh: no model call, a handful of API requests. */
+async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, context: Context): Promise<GateRepo | undefined> {
+	const repo = githubRepoOf(session.remote);
+	if (repo === undefined) return undefined;
+	const base = await baseBranchOf(repo, policy, context);
+	const head = JSON.parse(await gh(["api", `repos/${repo}/commits/${base}`, "--jq", "{sha: .sha, at: .commit.committer.date}"], context)) as { sha: string; at: string };
+	const me = await viewerLogin(context);
+	const prs = (JSON.parse(await gh(["pr", "list", "--repo", repo, "--author", me, "--state", "open", "--json", "number,headRefOid,headRefName"], context)) as {
+		number: number; headRefOid: string; headRefName: string;
+	}[]).filter((pr) => pr.headRefName.startsWith(policy.automerge.branchPrefix));
+	const openAgentPrs: GatePr[] = [];
+	for (const pr of prs) {
+		const checks = await checksFor(repo, pr.headRefOid, context);
+		const state = checks.some((c) => c.bucket === "fail" || c.bucket === "cancel") ? "fail" : checks.some((c) => c.bucket === "pending") ? "pending" : "pass";
+		openAgentPrs.push({ number: pr.number, headSha: pr.headRefOid, checksState: state });
+	}
+	const openFrictionIssues = loop.kind === "friction-sweep"
+		? Number((await gh(["issue", "list", "--repo", repo, "--label", FRICTION_LABEL, "--state", "open", "--json", "number", "--jq", "length"], context)).trim() || 0)
+		: 0;
+	return { baseHeadSha: head.sha, baseHeadCommittedAt: Date.parse(head.at), ...(loop.lastSeenBaseSha ? { lastSeenBaseSha: loop.lastSeenBaseSha } : {}), openAgentPrs, openFrictionIssues };
+}
+
 export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterations: number }>({
 	name: "pdl.loop",
 	version: 1,
@@ -1041,6 +1064,29 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				return stop("paused", `budget reached: $${spent.toFixed(2)} of $${loop.budgetUsd}`);
 			}
 			if (loop.iteration >= loop.maxIterations) return stop("done", `reached ${loop.maxIterations} iterations`);
+
+			// The cheap gate: decide from GitHub facts whether a model call is worth it at all.
+			const facts = await gateFacts(loop, session, policy, context).catch(() => undefined);
+			if (facts !== undefined) {
+				const gate = shouldWake({ loop: { kind: loop.kind, lastRunAt: loop.lastRunAt, iteration: loop.iteration, skipIfIdleHours: loop.skipIfIdleHours }, repo: facts, now: Date.now() });
+				if (!gate.wake) {
+					const minutes = gate.nextCheckMinutes ?? loop.intervalMinutes;
+					audit("loop_skip", { loop: loop.id, reason: gate.reason, nextCheckMinutes: minutes });
+					await runtime.commit(async (tx) => {
+						const current = (await tx.doc(Loops)).byId[task.input.loopId]!;
+						current.nextRunAt = Date.now() + minutes * 60_000;
+						current.skipped = (current.skipped ?? 0) + 1;
+						current.note = `skipped: ${gate.reason}`;
+						return { status: "running", checkpoint: { phase: "wait" } };
+					}, context);
+					return;
+				}
+				await runtime.commit(async (tx) => {
+					(await tx.doc(Loops)).byId[task.input.loopId]!.lastSeenBaseSha = facts.baseHeadSha;
+					// A plain document write: the task's state is unchanged until the iteration settles.
+					return undefined;
+				}, context);
+			}
 
 			const conversation = await harness().conversation(session.conversationId as never, context);
 			if (conversation === undefined) return stop("failed", "conversation missing");

@@ -23,6 +23,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
 import { dryRunGates, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
+import { type CleanupName, CLEANUP_PROMPTS, CLEANUP_SCHEDULE } from "./loopgate.ts";
 import { Approvals, audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -181,9 +182,16 @@ async function startProject(body: { repo?: string; name?: string; purpose?: stri
 	return { session, loop };
 }
 
-async function startLoop(body: { session?: string; goal?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number }) {
+async function startLoop(body: { session?: string; goal?: string; preset?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number }) {
 	const policy = loadPolicy();
 	const { conversation } = await sessionByName(String(body.session ?? ""));
+	// A preset is one of the cleanup automations: its own brief, schedule, and idle gate.
+	const preset = body.preset === undefined ? undefined : (body.preset as CleanupName);
+	if (preset !== undefined && !(preset in CLEANUP_PROMPTS)) throw new HttpError(400, `unknown preset; one of ${Object.keys(CLEANUP_PROMPTS).join(", ")}`);
+	if (preset !== undefined) {
+		body.goal = CLEANUP_PROMPTS[preset];
+		body.intervalMinutes ??= CLEANUP_SCHEDULE[preset].intervalMinutes;
+	}
 	if (!body.goal) throw new HttpError(400, "goal is required");
 	const usage = await harness.snapshot(UsageDoc, conversation.id, context);
 	let costAtStart = 0;
@@ -204,6 +212,7 @@ async function startLoop(body: { session?: string; goal?: string; intervalMinute
 			createdAt: Date.now(),
 			nextRunAt: Date.now(),
 			costAtStart,
+			...(preset === undefined ? {} : { kind: CLEANUP_SCHEDULE[preset].kind, ...(CLEANUP_SCHEDULE[preset].skipIfIdleHours ? { skipIfIdleHours: CLEANUP_SCHEDULE[preset].skipIfIdleHours } : {}) }),
 		};
 		// Background: the loop must not keep the session "busy" or die when someone presses Esc on a run.
 		loop.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true });

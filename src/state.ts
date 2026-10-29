@@ -61,6 +61,13 @@ export type Loop = {
 	nextRunAt?: number;
 	/** Session cost when the loop started, so the budget counts only the loop's own spend. */
 	costAtStart: number;
+	/** goal (default), cleanup (skips when the base branch is idle), or friction-sweep (skips with no open friction). */
+	kind?: "goal" | "cleanup" | "friction-sweep";
+	skipIfIdleHours?: number;
+	/** Base branch head when the loop last woke a model. */
+	lastSeenBaseSha?: string;
+	/** Ticks skipped without a model call, for status. */
+	skipped?: number;
 };
 
 export const Loops = defineDoc<{ byId: Record<string, Loop>; nextId: number }>({

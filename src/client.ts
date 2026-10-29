@@ -290,6 +290,8 @@ const HELP = `pd — pi-durable sessions that keep running
   pd tmux [names…]                          tmux session "pd": status window + one per session
 
   pd loop start <session> "goal" [--every 60] [--max 20] [--budget 5]
+  pd loop start <session> --preset keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
+                                            cleanup automations; skip without a model call when idle
   pd loop ls | pause <id> | resume <id> | stop <id>
   pd loop set <id> [--every 60] [--max 24] [--budget 5]
 
@@ -373,7 +375,8 @@ async function main(argv: string[]): Promise<void> {
 			if (sub === "start") {
 				const loop = await call("POST", "/loops", {
 					session: loopArgs[0],
-					goal: loopArgs.slice(1).join(" "),
+					goal: loopArgs.slice(1).join(" ") || undefined,
+					preset: typeof opts.preset === "string" ? opts.preset : undefined,
 					intervalMinutes: opts.every ? Number(opts.every) : undefined,
 					maxIterations: opts.max ? Number(opts.max) : undefined,
 					budgetUsd: opts.budget ? Number(opts.budget) : undefined,
