@@ -1,6 +1,6 @@
 // pd: terminal client for the pdd daemon.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { request } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -283,6 +283,7 @@ const HELP = `pd — pi-durable sessions that keep running
   pd attach <name>                          live view + chat (Ctrl-C detaches; agent keeps going)
   pd send <name> "message" [--steer]        fire and forget
   pd rm <name>                              remove a session (its history stays in the store)
+  pd ui [--rotate]                          local web UI on 127.0.0.1:7777 (PD_UI_PORT); prints a login link
   pd tmux [names…]                          tmux session "pd": status window + one per session
 
   pd loop start <session> "goal" [--every 60] [--max 20] [--budget 5]
@@ -336,6 +337,15 @@ async function main(argv: string[]): Promise<void> {
 			console.log(`session ${c.bold(result.session.name)} in ${result.session.cwd}`);
 			if (result.loop) printLoop(result.loop);
 			else console.log(c.dim(`no goal given; start one with: pd loop start ${result.session.name} "goal"`));
+			return;
+		}
+		case "ui": {
+			const tokenFile = resolve(DB_PATH, "..", "ui-token");
+			if (opts.rotate && existsSync(tokenFile)) {
+				unlinkSync(tokenFile);
+				console.log("ui token rotated; old links stop working");
+			}
+			spawnSync(resolve(import.meta.dirname, "..", "bin", "pd-ui"), { stdio: "inherit" });
 			return;
 		}
 		case "attach":
