@@ -1,0 +1,136 @@
+// Paths, secrets, and user-editable policy for the daemon and the `pd` client.
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const home = homedir();
+export const CONFIG_DIR = process.env.PD_CONFIG_DIR ?? join(home, ".config", "pi-durable");
+export const DATA_DIR = process.env.PD_DATA_DIR ?? join(home, ".local", "share", "pi-durable");
+export const SOCKET_PATH = process.env.PD_SOCKET ?? join(DATA_DIR, "pdd.sock");
+export const DB_PATH = join(DATA_DIR, "state.sqlite");
+export const ENV_FILE = join(CONFIG_DIR, "env");
+export const POLICY_FILE = join(CONFIG_DIR, "policy.json");
+export const AUDIT_LOG = join(DATA_DIR, "audit.jsonl");
+
+export type Policy = {
+	/** Default model for new sessions, as provider/modelId. */
+	model: string;
+	/** Model for the independent PR review gate. */
+	reviewModel: string;
+	/** Model that runs Anthropic server-side web search for the web_search tool. */
+	searchModel: string;
+	thinkingLevel: "off" | "minimal" | "low" | "medium" | "high";
+	/** Directories agents may write to. Edits and writes elsewhere are blocked. */
+	writableRoots: string[];
+	automerge: {
+		/** owner/repo entries that may be merged by `pr_merge`. Empty means auto-merge is off everywhere. */
+		repos: string[];
+		/** Branches agents work on must start with this. */
+		branchPrefix: string;
+		maxChangedLines: number;
+		maxChangedFiles: number;
+		/** Globs no automated PR may touch; matching PRs stay open for a human. */
+		protectedPaths: string[];
+		/** Require at least one CI check to exist and pass (a repo with no CI is never auto-merged). */
+		requireChecks: boolean;
+		requireAiReview: boolean;
+		mergeMethod: "squash" | "merge" | "rebase";
+	};
+	loops: {
+		/** Hard cap on spend per loop, in USD; the loop pauses when crossed. */
+		defaultBudgetUsd: number;
+		defaultIntervalMinutes: number;
+		defaultMaxIterations: number;
+	};
+};
+
+export const DEFAULT_POLICY: Policy = {
+	model: "anthropic/claude-opus-5-5",
+	reviewModel: "anthropic/claude-opus-5-5",
+	searchModel: "anthropic/claude-opus-5-5",
+	thinkingLevel: "medium",
+	writableRoots: [join(home, "proj"), "/tmp"],
+	automerge: {
+		repos: [],
+		branchPrefix: "pd/",
+		maxChangedLines: 600,
+		maxChangedFiles: 25,
+		protectedPaths: [
+			".github/**",
+			"**/.env*",
+			"**/*.pem",
+			"**/*.key",
+			"**/secrets/**",
+			"**/migrations/**",
+			"**/Dockerfile",
+			"**/*.tf",
+			"package-lock.json",
+			"pnpm-lock.yaml",
+			"yarn.lock",
+			"CODEOWNERS",
+			".pi/**",
+			"AGENTS.md",
+		],
+		requireChecks: true,
+		requireAiReview: true,
+		mergeMethod: "squash",
+	},
+	loops: { defaultBudgetUsd: 5, defaultIntervalMinutes: 60, defaultMaxIterations: 20 },
+};
+
+export function ensureDirs(): void {
+	mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+	mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+	if (!existsSync(POLICY_FILE)) writeFileSync(POLICY_FILE, `${JSON.stringify(DEFAULT_POLICY, null, "\t")}\n`);
+	if (!existsSync(ENV_FILE)) {
+		writeFileSync(
+			ENV_FILE,
+			"# Secrets for the pi-durable daemon. Agents' shells never see these.\nANTHROPIC_API_KEY=\n",
+			{ mode: 0o600 },
+		);
+	}
+}
+
+/** Read live: the policy file can be edited while the daemon runs. */
+export function loadPolicy(): Policy {
+	try {
+		const raw = JSON.parse(readFileSync(POLICY_FILE, "utf8")) as Partial<Policy>;
+		return {
+			...DEFAULT_POLICY,
+			...raw,
+			automerge: { ...DEFAULT_POLICY.automerge, ...raw.automerge },
+			loops: { ...DEFAULT_POLICY.loops, ...raw.loops },
+		};
+	} catch {
+		return DEFAULT_POLICY;
+	}
+}
+
+/** KEY=value lines; blank values are skipped so an empty template does not shadow the real environment. */
+export function loadSecrets(): Record<string, string> {
+	const secrets: Record<string, string> = {};
+	if (!existsSync(ENV_FILE)) return secrets;
+	for (const line of readFileSync(ENV_FILE, "utf8").split("\n")) {
+		const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+		if (!match || line.trimStart().startsWith("#")) continue;
+		const value = match[2]!.replace(/^(['"])(.*)\1$/, "$2");
+		if (value !== "") secrets[match[1]!] = value;
+	}
+	return secrets;
+}
+
+const SECRET_NAME = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)/i;
+
+/** The environment agent shells get: the daemon's, minus anything that looks like a secret. `gh` keeps its own login. */
+export function scrubbedEnv(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {};
+	for (const [name, value] of Object.entries(process.env)) if (!SECRET_NAME.test(name)) env[name] = value;
+	env.PD_AGENT = "1";
+	env.GIT_TERMINAL_PROMPT = "0";
+	return env;
+}
+
+export function splitModel(ref: string): { provider: string; modelId: string } {
+	const slash = ref.indexOf("/");
+	return slash < 0 ? { provider: "anthropic", modelId: ref } : { provider: ref.slice(0, slash), modelId: ref.slice(slash + 1) };
+}

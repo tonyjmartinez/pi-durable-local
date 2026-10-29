@@ -1,0 +1,21 @@
+[Unit]
+Description=pi-durable daemon (pdd): durable agent sessions, loops, shared memory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/proj/pi-durable-local
+Environment=PATH=/home/tonyjmartinez/.nvm/versions/node/v26.13.0/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/tonyjmartinez/.nvm/versions/node/v26.13.0/bin/node --no-warnings src/daemon.ts
+Restart=always
+RestartSec=5
+# A crash loop backs off instead of hammering the API.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+KillSignal=SIGTERM
+TimeoutStopSec=60
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
