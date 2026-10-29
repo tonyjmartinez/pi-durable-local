@@ -241,7 +241,7 @@ async function status(): Promise<void> {
 function printLoop(loop: Json): void {
 	const color = loop.status === "active" ? c.green : loop.status === "paused" ? c.yellow : loop.status === "failed" ? c.red : c.dim;
 	console.log(
-		`  ${c.bold(loop.id.padEnd(4))} ${color(loop.status.padEnd(7))} ${loop.session.padEnd(14)} ${loop.iteration}/${loop.maxIterations}  every ${loop.intervalMinutes}m  budget ${money(loop.budgetUsd)}  next ${loop.status === "active" ? ago(loop.nextRunAt) : "-"}`,
+		`  ${c.bold(loop.id.padEnd(4))} ${color(loop.status.padEnd(7))} ${loop.session.padEnd(14)} ${loop.iteration}/${loop.maxIterations}  every ${loop.intervalMinutes}m  ${money(loop.spent ?? 0)}/${money(loop.budgetUsd)}  next ${loop.status === "active" ? ago(loop.nextRunAt) : "-"}`,
 	);
 	console.log(`       ${loop.goal.slice(0, 110)}`);
 	if (loop.note) console.log(c.dim(`       ${loop.note.slice(0, 160)}`));

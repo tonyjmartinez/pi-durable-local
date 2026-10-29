@@ -165,6 +165,8 @@ export function assertResumable(loop: Pick<Loop, "id" | "status">): void {
 export function applyResume(loop: Loop, cost: number, now: number): void {
 	Object.assign(loop, { status: "active", note: "resumed", nextRunAt: now });
 	loop.costAtStart = cost;
+	// A resumed loop gets a fresh budget window.
+	loop.spent = 0;
 }
 
 /** The slice of the harness that ending a loop's task needs. Methods, so a real harness fits it. */

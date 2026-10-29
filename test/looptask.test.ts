@@ -39,8 +39,8 @@ let failNextCommit: boolean;
 
 const cost = (total: number) => ({ models: { m: { cost: { total } } }, tools: {} });
 const context = {} as never;
-const task = (checkpoint: Record<string, unknown>) => ({ input: { loopId: "L1" }, state: { checkpoint } });
-const loopDoc = () => store.peek<{ byId: Record<string, Loop> }>(Loops).byId.L1;
+const task = (checkpoint: Record<string, unknown>, loopId = "L1") => ({ input: { loopId }, state: { checkpoint } });
+const loopDoc = (id = "L1") => store.peek<{ byId: Record<string, Loop> }>(Loops).byId[id];
 const events = () => readAudit(AUDIT);
 const near = (actual: number, expected: number, within = 5_000) => assert.ok(Math.abs(actual - expected) < within, `${actual} is not within ${within} of ${expected}`);
 
@@ -218,8 +218,7 @@ describe("run phase: when to stop", () => {
 	});
 
 	it("pauses at the budget and says so in the audit log", async () => {
-		setup();
-		usage[1] = cost(4);
+		setup({ loop: { spent: 4 } });
 		await run();
 		assert.equal(loopDoc()!.status, "paused");
 		assert.equal(loopDoc()!.note, "budget reached: $4.00 of $3");
@@ -228,40 +227,50 @@ describe("run phase: when to stop", () => {
 		assert.match(String(entry?.note), /\$4\.00 of \$3; resume with pd loop resume L1/);
 	});
 
-	it("counts only spend since the loop started", async () => {
-		setup({ loop: { costAtStart: 10 } });
-		usage[1] = cost(12);
+	it("pauses exactly at the budget and runs just under it", async () => {
+		setup({ loop: { spent: 3 } });
+		await run();
+		assert.equal(loopDoc()!.status, "paused");
+		store = makeStore();
+		setup({ loop: { spent: 2.99 } });
 		await run();
 		assert.equal(loopDoc()!.status, "active");
 		assert.equal(submits.length, 1);
 	});
 
-	it("counts the session's subagents against the budget", async () => {
+	it("treats a loop that has spent nothing yet as at zero", async () => {
 		setup();
-		usage[1] = cost(1);
-		usage[2] = cost(2.5);
-		store.seed(Subagents, { parentOf: { "2": "s1" } });
+		assert.equal(loopDoc()!.spent, undefined);
 		await run();
-		assert.equal(loopDoc()!.status, "paused");
-		assert.match(loopDoc()!.note, /\$3\.50 of \$3/);
-	});
-
-	it("measures the budget window the same way the loop starts it, subagents included", async () => {
-		setup({ loop: { costAtStart: 3.5 } });
-		usage[1] = cost(1);
-		usage[2] = cost(2.5);
-		store.seed(Subagents, { parentOf: { "2": "s1" } });
-		await run();
-		assert.equal(loopDoc()!.status, "active", "spend since the start is zero");
+		assert.equal(loopDoc()!.status, "active");
 		assert.equal(submits.length, 1);
 	});
 
-	it("does not count another session's subagents", async () => {
+	it("budgets the loop's own spend, whatever the session has spent in total", async () => {
 		setup();
+		usage[1] = cost(50);
+		await run();
+		assert.equal(loopDoc()!.status, "active", "a session that spent a lot elsewhere does not pause a loop that has not");
+		assert.equal(submits.length, 1);
+	});
+
+	it("measures the session's cost, subagents included, before it submits", async () => {
+		setup();
+		usage[1] = cost(1);
+		usage[2] = cost(2.5);
+		store.seed(Subagents, { parentOf: { "2": "s1" } });
+		await run();
+		assert.equal((directives[0]!.checkpoint as { costBefore: number }).costBefore, 3.5);
+	});
+
+	it("does not count another session's subagents in that measure", async () => {
+		setup();
+		usage[1] = cost(1);
 		usage[2] = cost(100);
 		store.seed(Subagents, { parentOf: { "2": "other" } });
 		await run();
 		assert.equal(loopDoc()!.status, "active");
+		assert.equal((directives[0]!.checkpoint as { costBefore: number }).costBefore, 1);
 	});
 
 	it("is done at the iteration cap", async () => {
@@ -283,7 +292,7 @@ describe("run phase: submitting an iteration", () => {
 		assert.equal(submits[0]!.requestId, "loop:L1:0");
 		assert.deepEqual(submits[0]!.entry, { kind: "pdl.loop-tick", data: { loopId: "L1", iteration: 0 } });
 		assert.match(submits[0]!.content, /^\[loop L1, iteration 1\/5\]\nOngoing goal: Improve the thing/);
-		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0 } }]);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0, costBefore: 0 } }]);
 	});
 
 	it("uses the iteration from the checkpoint", async () => {
@@ -344,7 +353,7 @@ describe("run phase: the skip gate", () => {
 		gate();
 		await run();
 		assert.equal(submits.length, 1);
-		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0, baseSha: BASE_SHA } }]);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0, costBefore: 0, baseSha: BASE_SHA } }]);
 		assert.equal(loopDoc()!.lastSeenBaseSha, undefined, "recorded only once the iteration succeeds");
 	});
 
@@ -435,7 +444,7 @@ describe("run phase: the skip gate", () => {
 		gate({ baseFails: true });
 		await run();
 		assert.equal(submits.length, 1);
-		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0 } }]);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0, costBefore: 0 } }]);
 	});
 
 	it("does not gate a session whose origin is not GitHub", async () => {
@@ -524,11 +533,145 @@ describe("await phase", () => {
 		assert.equal(loopDoc()!.iteration, 1);
 	});
 
+	describe("charging the loop for the iteration", () => {
+		it("adds what the session spent while the iteration ran", async () => {
+			setup({ loop: { spent: 0.2 } });
+			sent();
+			usage[1] = cost(1.5);
+			await wait({ phase: "await", iteration: 0, costBefore: 1 });
+			near(loopDoc()!.spent!, 0.7, 1e-9);
+		});
+
+		it("includes the cost of the session's subagents", async () => {
+			setup();
+			sent();
+			usage[1] = cost(1);
+			usage[2] = cost(3);
+			store.seed(Subagents, { parentOf: { "2": "s1" } });
+			await wait({ phase: "await", iteration: 0, costBefore: 1 });
+			near(loopDoc()!.spent!, 3, 1e-9);
+		});
+
+		it("accumulates across iterations", async () => {
+			setup({ loop: { spent: 1 } });
+			sent();
+			usage[1] = cost(0.5);
+			await wait({ phase: "await", iteration: 0, costBefore: 0 });
+			near(loopDoc()!.spent!, 1.5, 1e-9);
+		});
+
+		it("charges an iteration that failed or was not answered", async () => {
+			setup();
+			sent();
+			settle = { status: "unanswered" };
+			usage[1] = cost(0.4);
+			await wait({ phase: "await", iteration: 0, costBefore: 0 });
+			near(loopDoc()!.spent!, 0.4, 1e-9);
+		});
+
+		it("charges a loop that paused itself during the iteration", async () => {
+			setup({ loop: { status: "paused", note: "blocked" } });
+			sent();
+			usage[1] = cost(0.6);
+			await wait({ phase: "await", iteration: 0, costBefore: 0 });
+			near(loopDoc()!.spent!, 0.6, 1e-9);
+			assert.equal(loopDoc()!.status, "paused");
+		});
+
+		it("charges nothing when the cost before is unknown, as after a crash that reattached", async () => {
+			setup();
+			sent();
+			usage[1] = cost(9);
+			await wait({ phase: "await", iteration: 0 });
+			assert.equal(loopDoc()!.spent, undefined);
+		});
+
+		it("never charges a negative amount", async () => {
+			setup({ loop: { spent: 1 } });
+			sent();
+			usage[1] = cost(0.5);
+			await wait({ phase: "await", iteration: 0, costBefore: 2 });
+			assert.equal(loopDoc()!.spent, 1);
+		});
+
+		it("charges nothing for a session that is gone", async () => {
+			setup({ session: false, loop: { spent: 1 } });
+			await wait({ phase: "await", iteration: 0, costBefore: 2 });
+			assert.equal(loopDoc()!.spent, 1);
+		});
+
+		it("pauses the loop on its next run once the iterations have used the budget", async () => {
+			setup({ loop: { budgetUsd: 1, maxIterations: 5 }, remote: null });
+			await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+			usage[1] = cost(1.2);
+			await phases.await(task({ phase: "await", iteration: 0, costBefore: 0 }), runtime(), context);
+			assert.equal(loopDoc()!.status, "active");
+			await phases.run(task({ phase: "run", iteration: 1 }), runtime(), context);
+			assert.equal(loopDoc()!.status, "paused");
+			assert.match(loopDoc()!.note, /budget reached: \$1\.20 of \$1/);
+			assert.equal(submits.length, 1);
+		});
+	});
+
 	it("ends the task when the loop was removed", async () => {
 		setup({ loop: null });
 		sent();
 		await wait({ phase: "await", iteration: 3 });
 		assert.deepEqual(directives, [{ status: "terminal", outcome: { status: "completed", result: { iterations: 3 } } }]);
+	});
+});
+
+describe("two loops on one session", () => {
+	const seedTwo = (change: Partial<Loop> = {}) => {
+		store.seed(Loops, { byId: { L1: baseLoop(), L2: baseLoop({ id: "L2", goal: "A different goal", ...change }) }, nextId: 3 });
+		setup({ loop: null, remote: null });
+	};
+	const iterate = async (id: string, iteration: number, totalCostAfter: number) => {
+		await phases.run(task({ phase: "run", iteration }, id), runtime(), context);
+		const costBefore = (directives.at(-1)!.checkpoint as { costBefore: number }).costBefore;
+		usage[1] = cost(totalCostAfter);
+		await phases.await(task({ phase: "await", iteration, costBefore }, id), runtime(), context);
+	};
+
+	it("do not charge each other for their spend", async () => {
+		seedTwo();
+		await iterate("L1", 0, 2.5);
+		near(loopDoc("L1")!.spent!, 2.5, 1e-9);
+		assert.equal(loopDoc("L2")!.spent, undefined, "L1's spend is not L2's");
+		await iterate("L2", 0, 3.5);
+		near(loopDoc("L2")!.spent!, 1, 1e-9);
+		near(loopDoc("L1")!.spent!, 2.5, 1e-9);
+	});
+
+	it("keep running while the other has used its whole budget", async () => {
+		seedTwo();
+		await iterate("L1", 0, 3.2);
+		await phases.run(task({ phase: "run", iteration: 1 }, "L1"), runtime(), context);
+		assert.equal(loopDoc("L1")!.status, "paused", "L1 used its budget");
+		submits.length = 0;
+		await phases.run(task({ phase: "run", iteration: 0 }, "L2"), runtime(), context);
+		assert.equal(loopDoc("L2")!.status, "active", "the session's total spend is not L2's budget");
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L2:0"]);
+	});
+
+	it("start the second one at zero even when the session has spent a lot", async () => {
+		seedTwo();
+		usage[1] = cost(40);
+		await phases.run(task({ phase: "run", iteration: 0 }, "L2"), runtime(), context);
+		assert.equal(loopDoc("L2")!.status, "active");
+		assert.equal((directives.at(-1)!.checkpoint as { costBefore: number }).costBefore, 40);
+		usage[1] = cost(40.25);
+		await phases.await(task({ phase: "await", iteration: 0, costBefore: 40 }, "L2"), runtime(), context);
+		near(loopDoc("L2")!.spent!, 0.25, 1e-9);
+	});
+
+	it("send each loop's own prompt under its own request id", async () => {
+		seedTwo();
+		await iterate("L1", 0, 0.1);
+		await iterate("L2", 0, 0.2);
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:0", "loop:L2:0"]);
+		assert.match(submits[0]!.content, /Improve the thing/);
+		assert.match(submits[1]!.content, /A different goal/);
 	});
 });
 
@@ -598,7 +741,7 @@ describe("whole iterations", () => {
 		await phases.run(task(initial({ loopId: "L1" })), runtime(), context);
 		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:3"], "a new iteration is sent, not an old one reattached");
 		assert.match(submits[0]!.content, /iteration 4\/5/);
-		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 3 } }]);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 3, costBefore: 0 } }]);
 	});
 
 	it("stops when the loop is paused between iterations", async () => {

@@ -307,12 +307,13 @@ describe("stopPatch, assertResumable and applyResume", () => {
 	});
 
 	it("resuming activates the loop now with a fresh budget window, and keeps its history", () => {
-		const loop = base();
+		const loop = { ...base(), spent: 4.2 };
 		applyResume(loop, 9.5, 5_000);
 		assert.equal(loop.status, "active");
 		assert.equal(loop.note, "resumed");
 		assert.equal(loop.nextRunAt, 5_000);
 		assert.equal(loop.costAtStart, 9.5);
+		assert.equal(loop.spent, 0, "the loop's own spend starts again from zero");
 		assert.equal(loop.iteration, 3);
 		assert.equal(loop.lastSeenBaseSha, "abc");
 		assert.equal(loop.budgetUsd, 5);

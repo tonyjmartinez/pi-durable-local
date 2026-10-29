@@ -1236,7 +1236,7 @@ Advance this goal by one meaningful, reviewable step, then stop. Each iteration:
 type LoopCheckpoint =
 	| { phase: "wait" }
 	| { phase: "run"; iteration: number }
-	| { phase: "await"; iteration: number; baseSha?: string };
+	| { phase: "await"; iteration: number; baseSha?: string; costBefore?: number };
 
 /** What the loop gate needs, from GitHub via the daemon's gh: no model call, a handful of API requests. */
 async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, context: Context): Promise<GateRepo | undefined> {
@@ -1296,7 +1296,7 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration } }), context);
 				return;
 			}
-			const spent = (await sessionCost(runtime, loop.session, session.conversationId, context)) - loop.costAtStart;
+			const spent = loop.spent ?? 0;
 			if (spent >= loop.budgetUsd) {
 				audit("loop_budget", { loop: loop.id, session: loop.session, note: `$${spent.toFixed(2)} of $${loop.budgetUsd}; resume with pd loop resume ${loop.id}` });
 				return stop("paused", `budget reached: $${spent.toFixed(2)} of $${loop.budgetUsd}`);
@@ -1322,6 +1322,8 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 
 			const conversation = await harness().conversation(session.conversationId as never, context);
 			if (conversation === undefined) return stop("failed", "conversation missing");
+			// The loop's spend is the session's cost change across this iteration, measured from just before the prompt.
+			const costBefore = await sessionCost(runtime, loop.session, session.conversationId, context);
 			// The request ID makes a resubmission find the same submission, never a second one.
 			await conversation.submit(
 				{
@@ -1332,10 +1334,10 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				},
 				context,
 			);
-			await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration, ...(facts ? { baseSha: facts.baseHeadSha } : {}) } }), context);
+			await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration, costBefore, ...(facts ? { baseSha: facts.baseHeadSha } : {}) } }), context);
 		},
 		await: async (task, runtime, context) => {
-			const { iteration, baseSha } = task.state.checkpoint;
+			const { iteration, baseSha, costBefore } = task.state.checkpoint;
 			const loop = (await runtime.snapshot(Loops, context))?.byId[task.input.loopId];
 			const session = loop === undefined ? undefined : (await runtime.snapshot(Sessions, context))?.byName[loop.session];
 			const record = session === undefined
@@ -1343,11 +1345,13 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				: await harness().commit((tx) => tx.submissionByRequest(session.conversationId as never, `loop:${task.input.loopId}:${iteration}`), context);
 			const submission = record === undefined ? undefined : await harness().submission(record.id, context);
 			const settled = submission === undefined ? undefined : await submission.wait(context);
+			const costAfter = session === undefined ? 0 : await sessionCost(runtime, loop!.session, session.conversationId, context);
 			await runtime.commit(async (tx) => {
 				const current = (await tx.doc(Loops)).byId[task.input.loopId];
 				if (current === undefined) return { status: "terminal", outcome: { status: "completed", result: { iterations: iteration } } };
 				current.iteration = iteration + 1;
 				current.lastRunAt = Date.now();
+				if (costBefore !== undefined) current.spent = (current.spent ?? 0) + Math.max(0, costAfter - costBefore);
 				current.nextRunAt = Date.now() + current.intervalMinutes * 60_000;
 				// Only a completed iteration counts as having seen this base; a failed one retries even if nothing changed.
 				if (settled?.status === "done" && baseSha !== undefined) current.lastSeenBaseSha = baseSha;

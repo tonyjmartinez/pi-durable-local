@@ -59,8 +59,13 @@ export type Loop = {
 	createdAt: number;
 	lastRunAt?: number;
 	nextRunAt?: number;
-	/** Session cost when the loop started, so the budget counts only the loop's own spend. */
+	/** Session cost when the loop started (kept for history; budgets use `spent`). */
 	costAtStart: number;
+	/**
+	 * This loop's own spend: the session's cost change across each of its iterations. Measured per loop, so two
+	 * loops on one session don't charge each other.
+	 */
+	spent?: number;
 	/** goal (default), cleanup (skips when the base branch is idle), or friction-sweep (skips with no open friction). */
 	kind?: "goal" | "cleanup" | "friction-sweep";
 	skipIfIdleHours?: number;
