@@ -574,6 +574,13 @@ async function pushWorkBranch(session: string, info: SessionInfo, branch: string
 			`refusing to push changes under .github/ (${workflow.join(", ")}): GitHub would run them with this repo's secrets before review. Put a proposed workflow at docs/proposed-ci/<name>.yml instead and ask Tony to install it.`,
 		);
 	}
+	const stale = await staleCommits(mirror, base, branch, context);
+	if (stale !== undefined) {
+		audit("push_refused", { session, branch, reason: "stale base", detail: stale });
+		throw new Error(
+			`refusing to push ${branch}: ${stale}. Branch from the latest deploy branch instead: call git_sync, run the fetch it prints, then \`git checkout -B ${branch} origin/${base}\` and cherry-pick only your own commits.`,
+		);
+	}
 	const sha = await git(["-C", mirror, "rev-parse", `refs/heads/${branch}`], context);
 	await git(["-C", mirror, "push", "--quiet", "origin", `${force ? "+" : ""}refs/heads/${branch}:refs/heads/${branch}`], context);
 	await harness().commit(async (tx) => {
@@ -581,6 +588,31 @@ async function pushWorkBranch(session: string, info: SessionInfo, branch: string
 	}, context);
 	audit("pushed", { session, branch, sha, force });
 	return sha;
+}
+
+/**
+ * Why a work branch was cut from a stale base, or undefined. Branching from an old local HEAD drags an earlier PR's
+ * commits into the diff (they show up again after a squash merge): catch commits whose patch is already on the base,
+ * and commits that also sit on another of this session's work branches.
+ */
+async function staleCommits(mirror: string, base: string, branch: string, context: Context): Promise<string | undefined> {
+	const upstream = `refs/remotes/origin/${base}`;
+	const head = `refs/heads/${branch}`;
+	const merged = (await git(["-C", mirror, "cherry", upstream, head], context))
+		.split("\n")
+		.filter((line) => line.startsWith("- "))
+		.map((line) => line.slice(2, 9));
+	if (merged.length > 0) return `${merged.length} commit(s) (${merged.join(", ")}) are already on ${base}`;
+	const others = (await git(["-C", mirror, "for-each-ref", "--format=%(refname)", "refs/heads"], context))
+		.split("\n")
+		.filter((ref) => ref !== "" && ref !== head);
+	if (others.length === 0) return undefined;
+	const ours = (await git(["-C", mirror, "rev-list", head, `^${upstream}`], context)).split("\n").filter(Boolean);
+	const own = new Set((await git(["-C", mirror, "rev-list", head, `^${upstream}`, ...others.map((ref) => `^${ref}`)], context)).split("\n").filter(Boolean));
+	const shared = ours.filter((sha) => !own.has(sha));
+	if (shared.length === 0) return undefined;
+	const where = (await git(["-C", mirror, "for-each-ref", "--contains", shared[0]!, "--format=%(refname:short)", ...others], context)).split("\n").filter(Boolean);
+	return `${shared.length} commit(s) (${shared.map((sha) => sha.slice(0, 7)).join(", ")}) come from another work branch (${where.join(", ") || "an earlier PR"})`;
 }
 
 export const MIRRORS_DIR = join(DATA_DIR, "mirrors");
@@ -1047,8 +1079,11 @@ export const Git_ = defineExtension({
 					const mirror = await ensureMirror(session.name, session.info, context);
 					await git(["-C", mirror, "fetch", "--prune", "--no-tags", "--quiet", "origin", "+refs/heads/*:refs/remotes/origin/*"], context);
 					const heads = await git(["-C", mirror, "for-each-ref", "--format=%(refname:short) %(objectname:short)", "refs/remotes/origin"], context);
+					const policy = loadPolicy();
+					const repo = githubRepoOf(session.info.remote);
+					const base = repo === undefined ? "<deploy-branch>" : await baseBranchOf(repo, policy, context);
 					return text(
-						`Mirror updated. Now run:\n  git fetch --prune ${mirror} '+refs/remotes/origin/*:refs/remotes/origin/*'\nThen branch from origin/<deploy-branch>.\n\nBranches on GitHub:\n${heads}`,
+						`Mirror updated. Now run:\n  git fetch --prune ${mirror} '+refs/remotes/origin/*:refs/remotes/origin/*'\nThen start every new work branch from origin/${base}, never from your current HEAD:\n  git checkout -B ${policy.automerge.branchPrefix}<name> origin/${base}\n\nBranches on GitHub:\n${heads}`,
 					);
 				} catch (error) {
 					return fail(`Sync failed: ${String((error as { stderr?: string }).stderr || error).slice(0, 600)}`);
