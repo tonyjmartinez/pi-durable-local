@@ -159,9 +159,9 @@ ${RULES}
 ${END}`,
 
 	"friction-sweep": `Sweep the friction issues.
-List the open issues labelled friction. Skip any marked needs-decision or friction-skipped. Take the highest priority first (P0, then P1, P2, P3); within a priority, the oldest. If you already have a PR open for an issue, finish that PR instead of starting another.
+List the open issues labelled friction with issue_list (label friction, search "-label:needs-decision -label:friction-skipped") and read one with issue_view. Take the highest priority first (P0, then P1, P2, P3); within a priority, the oldest. If you already have a PR open for an issue, finish that PR instead of starting another.
 - Fix the root cause, not the symptom. Reference the issue in the PR (Fixes #N) and say how you reproduced the problem and how you know it is gone.
-- If an issue is already fixed or is invalid, close it with a one-line note saying why, and count that as your iteration.
+- If an issue is already fixed or is invalid, close it with issue_close and a one-line note saying why, and count that as your iteration.
 - For a routine, reversible product decision, choose the option that best serves users and document why. Mark needs-decision only for a one-way change, a safety-policy change, or a fact only the owner can provide; include the options and a recommendation.
 ${RULES}
 ${END}`,
