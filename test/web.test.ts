@@ -280,6 +280,7 @@ describe("page source", () => {
 				|| /^\/(sessions|loops)$/.test(path)
 				|| (path === "/sessions/" || path === "/loops/") && method === "POST"
 				|| path === "/sessions/" && method === "GET"
+				|| /^\/chat(\?limit=\d+)?$/.test(path)
 				|| /^\/processes(\/log\?lines=\d+)?$/.test(path) && method === "GET"
 				|| path === "/processes/" && method === "POST";
 			assert.ok(known, `unexpected API call: ${method} ${path}`);

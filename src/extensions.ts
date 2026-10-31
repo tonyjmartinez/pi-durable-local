@@ -1,5 +1,6 @@
 // Every extension the daemon installs: coding context, shared memory, cross-session messaging, web access,
 // the gated PR merge, project loops, and the safety guard.
+import { appendChat, makeMessage } from "./chat.ts";
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
@@ -288,6 +289,12 @@ export const Sessions_ = defineExtension({
 					},
 					context,
 				);
+				// Show the exchange in the shared agent channel (pd ui, pd-chat).
+				try {
+					appendChat({ ...makeMessage({ from, to: args.to, text: args.message }), delivered: true });
+				} catch {
+					// The channel is a view of the conversation; it must never fail the send.
+				}
 				return text(`Sent to ${args.to}.`);
 			},
 		}),

@@ -9,7 +9,7 @@ One daemon, `pdd`, owns a pi-durable SQLite store at `~/.local/share/pi-durable/
 - **A ship loop.** Agents open PRs from a template, and a deterministic state machine (`pr_tick`) says what to do next, runs an independent review, and merges low and medium risk changes that pass every gate. Anything riskier waits for you.
 - **Loops.** A session can be woken on an interval to push a goal forward, within a dollar budget and an iteration cap. A gate decides in code, before any model runs, whether a tick is worth it.
 - **Shared memory.** One durable document that every session reads in its system prompt and writes through `memory_save`, `memory_search`, and `memory_forget`.
-- **Cross-session messaging.** `sessions_list` and `session_send` let sessions hand work to each other.
+- **Cross-session messaging.** `sessions_list` and `session_send` let sessions hand work to each other. The UI's Chat tab and `bin/pd-chat` show those messages and let Claude Code, Codex and you join in; see `docs/agent-chat.md`.
 - **Safeguards.** Every agent shell runs in a bubblewrap sandbox with no credentials. The daemon pushes and opens PRs on the agents' behalf, and an audit log records every decision.
 - **Phone notifications and a friction log.** The daemon tells you when something needs you, and agents file the papercuts that slowed them down as GitHub issues that other agents fix.
 - **Web access.** `web_search` (Anthropic server-side search) and `web_fetch` (public http(s) only; private and local addresses are blocked).

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# pd-chat: read and post to the agent channel (see src/chatcli.ts).
+exec node --no-warnings "$(dirname "$(readlink -f "$0")")/../src/chatcli.ts" "$@"
