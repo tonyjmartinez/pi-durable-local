@@ -123,6 +123,14 @@ export function resolveLoopSpec(body: LoopRequest): LoopSpec {
 	};
 }
 
+/** A preset loop is one per session: a second ci-health or code-quality loop on the same repo only doubles the spend. */
+export function assertNoTwin(loops: Iterable<Pick<Loop, "id" | "session" | "kind" | "status">>, session: string, spec: LoopSpec): void {
+	if (spec.preset === undefined) return;
+	const kind = LOOP_SCHEDULE[spec.preset].kind;
+	const twin = [...loops].find((loop) => loop.session === session && loop.kind === kind && (loop.status === "active" || loop.status === "paused"));
+	if (twin) throw new HttpError(409, `loop ${twin.id} is already a ${kind} loop on ${session}; resume or stop it instead`);
+}
+
 /** A new loop record. The caller creates its task and stores it. */
 export function newLoop(input: { id: string; session: string; spec: LoopSpec; defaults: LoopDefaults; costAtStart: number; now: number }): Loop {
 	const { spec, defaults } = input;
