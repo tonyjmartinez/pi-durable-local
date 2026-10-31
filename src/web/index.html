@@ -36,6 +36,7 @@ main.chat { display: flex; flex-direction: column; overflow: hidden; padding-bot
 .row.wrap { flex-wrap: wrap; }
 .grow { flex: 1; min-width: 0; }
 .dim { color: var(--dim); font-size: 13px; }
+.logbox { max-height: 50vh; overflow: auto; white-space: pre-wrap; }
 .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
 .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); flex: none; }
@@ -133,7 +134,7 @@ let current = null; // session name when a transcript is open
 let streamCtl = null;
 let pollTimer = null;
 
-const TABS = [["sessions", "Sessions"], ["loops", "Loops"], ["memory", "Memory"], ["audit", "Audit"]];
+const TABS = [["sessions", "Sessions"], ["loops", "Loops"], ["memory", "Memory"], ["audit", "Audit"], ["processes", "Processes"]];
 function drawTabs() {
   $("tabs").replaceChildren(...TABS.map(([id, label]) =>
     h("button", { role: "tab", "aria-selected": String(tab === id && !current), onclick: () => go(id) }, label)));
@@ -160,6 +161,7 @@ function render() {
   if (tab === "loops") return renderLoops();
   if (tab === "memory") return renderMemory();
   if (tab === "audit") return renderAudit();
+  if (tab === "processes") return renderProcesses();
 }
 
 // ---- sessions ----
@@ -385,6 +387,34 @@ async function renderAudit() {
     const select = h("select", { onchange: (e) => { auditKind = e.target.value; draw(); } }, h("option", { value: "" }, "All events"), ...kinds.map((k) => h("option", { value: k, ...(k === auditKind ? { selected: true } : {}) }, k)));
     draw();
     main.replaceChildren(h("div", { class: "card row" }, select, h("span", { class: "dim" }, "last " + rows.length)), body);
+  } catch (e) { main.replaceChildren(h("div", { class: "banner" }, e.message)); }
+}
+
+// ---- processes ----
+async function renderProcesses() {
+  const act = async (action) => {
+    const label = { start: "Start the daemon?", stop: "Stop the daemon and its supervisor? Running agents pause until it is started again.", restart: "Restart the daemon? Running agents pause briefly and resume from their last step." }[action];
+    if (!confirm(label)) return;
+    try { await api("POST", "/processes/" + action, {}); } catch (e) { alert(e.message); }
+    setTimeout(renderProcesses, 1500);
+  };
+  try {
+    const [report, tail] = await Promise.all([api("GET", "/processes"), api("GET", "/processes/log?lines=200")]);
+    const rows = report.processes.map((p) => h("div", { class: "card row wrap" },
+      h("span", { class: "dot" + (p.running ? " busy" : "") }),
+      h("strong", {}, p.name),
+      h("span", { class: "dim" }, p.running ? "pid " + p.pid + " · up " + (p.uptime || "?") + (p.rssMb != null ? " · " + p.rssMb + " MB" : "") : "not running")));
+    const log = h("pre", { class: "mono logbox" }, tail.log || "(log is empty)");
+    main.replaceChildren(
+      h("div", { class: "card row wrap" },
+        h("span", { class: report.socketReachable ? "" : "dim" }, "Daemon socket: " + (report.socketReachable ? "answering" : "not answering")),
+        h("button", { class: "btn", onclick: () => act("start") }, "Start"),
+        h("button", { class: "btn", onclick: () => act("restart") }, "Restart"),
+        h("button", { class: "btn danger", onclick: () => act("stop") }, "Stop"),
+        h("button", { class: "btn", onclick: renderProcesses }, "Refresh")),
+      ...rows,
+      h("div", { class: "card" }, h("strong", {}, "Daemon log"), log));
+    log.scrollTop = log.scrollHeight;
   } catch (e) { main.replaceChildren(h("div", { class: "banner" }, e.message)); }
 }
 

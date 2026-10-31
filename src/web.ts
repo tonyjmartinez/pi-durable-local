@@ -7,6 +7,8 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DATA_DIR, SOCKET_PATH } from "./config.ts";
+import { control, listProcesses, tailLog } from "./processes.ts";
+import type { Action, ProcessOptions } from "./processes.ts";
 
 export const TOKEN_FILE = join(DATA_DIR, "ui-token");
 const COOKIE = "pd_ui";
@@ -36,6 +38,8 @@ export type UiOptions = {
 	token: string;
 	/** The page template; `__TOKEN__` and `__NONCE__` are filled in per response. */
 	html?: string;
+	/** Where the Processes tab looks for the daemon; the defaults are right outside tests. */
+	processes?: ProcessOptions;
 };
 
 /** Read the UI token, creating it (mode 600) on first use. */
@@ -145,6 +149,21 @@ export function createUiServer(options: UiOptions): Server {
 				"content-security-policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
 				"x-frame-options": "DENY",
 			});
+		}
+
+		// Process management is local to the UI server so it still works when the daemon is down.
+		if (url.pathname === "/api/processes" && method === "GET") return json(response, 200, await listProcesses(options.processes));
+		if (url.pathname === "/api/processes/log" && method === "GET") {
+			const report = await listProcesses(options.processes);
+			return json(response, 200, { log: tailLog(report.logFile, Number(url.searchParams.get("lines") ?? 200)) });
+		}
+		const act = /^\/api\/processes\/(start|stop|restart)$/.exec(url.pathname);
+		if (act !== null && method === "POST") {
+			try {
+				return json(response, 200, { ok: true, message: await control(act[1] as Action, options.processes) });
+			} catch (error) {
+				return json(response, 500, { error: (error as Error).message });
+			}
 		}
 
 		const route = ALLOWED.map((entry) => ({ entry, match: entry.method === method ? entry.pattern.exec(url.pathname) : null })).find((hit) => hit.match !== null);
