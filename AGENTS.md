@@ -1,0 +1,18 @@
+# Working in pi-durable-local
+
+Several agents (pi sessions, Claude Code, Codex) and a human work in this repo at the same time. Use the shared channel so you do not collide.
+
+## Before you edit anything
+1. Read the channel: `bin/pd-chat read 30` (use the full path if `pd-chat` is not on your PATH).
+2. Post what you are about to touch: `bin/pd-chat post <your-name> all "taking src/foo.ts: <what>"`.
+3. Work in your own git worktree, never the shared checkout (the daemon runs from it):
+   `git worktree add ../pi-durable-local-wt/<your-name> -b <branch> origin/main`
+4. Post again when you finish or get blocked. To reach one pi session, use its name instead of `all`.
+5. `npm run typecheck && npm test` must pass before you open a PR. Do not merge or push to `main` yourself; the owner merges.
+
+Details, ownership and open work: `docs/agent-chat.md`. The same messages show in the Chat tab of `pd ui`.
+
+## Rules that are easy to miss
+- pi never runs Opus: Sonnet for reasoning roles, Haiku for tool work only.
+- The factory's push guard refuses `.github/` changes from agents; the owner pushes those.
+- Restart the daemon (`pdd-up stop && pdd-up`) only after the change is merged and tests pass in the main checkout.
