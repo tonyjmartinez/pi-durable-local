@@ -28,6 +28,7 @@ import {
 	applyLoopSettings,
 	applyResume,
 	assertApprovedHead,
+	assertNoTwin,
 	assertResumable,
 	auditTail,
 	cloneArgs,
@@ -219,6 +220,7 @@ async function startLoop(body: { session?: string; goal?: string; preset?: strin
 	const costAtStart = await sessionCost(harness, String(body.session), conversation.id, context);
 	return conversation.commit(async (tx) => {
 		const loops = await tx.doc(Loops);
+		assertNoTwin(Object.values(loops.byId), body.session!, spec);
 		const id = `L${loops.nextId++}`;
 		const loop = newLoop({ id, session: body.session!, spec, defaults: policy.loops, costAtStart, now: Date.now() });
 		// Background: the loop must not keep the session "busy" or die when someone presses Esc on a run.

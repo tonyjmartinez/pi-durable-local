@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { CLEANUP_PROMPTS, CLEANUP_SCHEDULE } from "../src/loopgate.ts";
 import {
-	applyLoopSettings, applyResume, assertApprovedHead, assertResumable, auditTail, cloneArgs, cloneEnv, editProjectPolicy, endLiveTask,
+	applyLoopSettings, applyResume, assertApprovedHead, assertNoTwin, assertResumable, auditTail, cloneArgs, cloneEnv, editProjectPolicy, endLiveTask,
 	HttpError, LOOP_LIMITS, newLoop, newMemory, parseApproval, parseRepo, projectDir, projectSessionName, resolveLoopSpec, sendMode,
 	stopPatch, updateProjectPolicy, validateSessionName,
 } from "../src/ops.ts";
@@ -291,6 +291,22 @@ describe("applyLoopSettings", () => {
 		const loop = base();
 		applyLoopSettings(loop, { budgetUsd: 7 });
 		assert.deepEqual([loop.intervalMinutes, loop.maxIterations, loop.budgetUsd], [60, 10, 7]);
+	});
+});
+
+describe("assertNoTwin", () => {
+	const ci = resolveLoopSpec({ preset: "ci-health" });
+	it("refuses a second live loop of a preset's kind on the same session", () => {
+		for (const loopStatus of ["active", "paused"] as const) {
+			assert.equal(status(() => assertNoTwin([{ id: "L19", session: "s", kind: "ci-health", status: loopStatus }], "s", ci)), 409);
+		}
+		assert.throws(() => assertNoTwin([{ id: "L19", session: "s", kind: "ci-health", status: "active" }], "s", ci), /L19 is already a ci-health loop on s/);
+	});
+
+	it("allows it on another session, after the old one is done, for another kind, or for a plain goal", () => {
+		const loops = [{ id: "L1", session: "s", kind: "ci-health" as const, status: "done" as const }, { id: "L2", session: "t", kind: "ci-health" as const, status: "active" as const }, { id: "L3", session: "s", kind: "code-quality" as const, status: "active" as const }];
+		assert.doesNotThrow(() => assertNoTwin(loops, "s", ci));
+		assert.doesNotThrow(() => assertNoTwin([{ id: "L4", session: "s", kind: "goal", status: "active" }], "s", resolveLoopSpec({ goal: "g" })));
 	});
 });
 
