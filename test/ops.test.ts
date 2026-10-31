@@ -177,7 +177,7 @@ describe("resolveLoopSpec", () => {
 
 	it("refuses an unknown preset and lists the real ones", () => {
 		for (const preset of ["nope", "", "KEEP-TESTS-TIGHT"]) assert.equal(status(() => resolveLoopSpec({ preset })), 400, preset);
-		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep/);
+		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, product-gardener/);
 	});
 
 	it("refuses names that only exist on every object", () => {
@@ -317,6 +317,16 @@ describe("stopPatch, assertResumable and applyResume", () => {
 		assert.equal(loop.iteration, 3);
 		assert.equal(loop.lastSeenBaseSha, "abc");
 		assert.equal(loop.budgetUsd, 5);
+	});
+
+	it("resuming wakes a dormant loop: an active loop that ran out of work", () => {
+		assert.doesNotThrow(() => assertResumable({ id: "L1", status: "active", dormant: { fingerprint: "f", since: 1 } }));
+		const loop: Loop = { ...base(), status: "active", dormant: { fingerprint: "f", since: 1 }, noopStreak: 3, idleReported: true };
+		applyResume(loop, 1, 5_000);
+		assert.equal(loop.dormant, undefined);
+		assert.equal(loop.idleReported, undefined);
+		assert.equal(loop.noopStreak, 0);
+		assert.equal(loop.nextRunAt, 5_000);
 	});
 });
 

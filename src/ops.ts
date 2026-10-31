@@ -3,7 +3,7 @@
 // can be tested without opening the store or a socket.
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { CLEANUP_PROMPTS, CLEANUP_SCHEDULE, type CleanupName } from "./loopgate.ts";
+import { LOOP_PROMPTS, LOOP_SCHEDULE, type LoopPreset } from "./loopgate.ts";
 import type { Loop, Memory } from "./state.ts";
 
 export class HttpError extends Error {
@@ -88,7 +88,7 @@ export function assertApprovedHead(head: string, expected: string): void {
 // Loops
 
 export type LoopRequest = { session?: string; goal?: string; preset?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number };
-export type LoopSpec = { goal: string; preset?: CleanupName; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number };
+export type LoopSpec = { goal: string; preset?: LoopPreset; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number };
 export type LoopDefaults = { defaultBudgetUsd: number; defaultIntervalMinutes: number; defaultMaxIterations: number };
 
 /** What a request may ask for. The settings route enforces the same floor for the interval. */
@@ -104,14 +104,14 @@ const clamp = (value: number | undefined, [min, max]: readonly [number, number])
 export function resolveLoopSpec(body: LoopRequest): LoopSpec {
 	let goal = body.goal;
 	let intervalMinutes = body.intervalMinutes;
-	let preset: CleanupName | undefined;
+	let preset: LoopPreset | undefined;
 	if (body.preset !== undefined) {
-		if (typeof body.preset !== "string" || !Object.hasOwn(CLEANUP_PROMPTS, body.preset)) {
-			throw new HttpError(400, `unknown preset; one of ${Object.keys(CLEANUP_PROMPTS).join(", ")}`);
+		if (typeof body.preset !== "string" || !Object.hasOwn(LOOP_PROMPTS, body.preset)) {
+			throw new HttpError(400, `unknown preset; one of ${Object.keys(LOOP_PROMPTS).join(", ")}`);
 		}
-		preset = body.preset as CleanupName;
-		goal = CLEANUP_PROMPTS[preset];
-		intervalMinutes ??= CLEANUP_SCHEDULE[preset].intervalMinutes;
+		preset = body.preset as LoopPreset;
+		goal = LOOP_PROMPTS[preset];
+		intervalMinutes ??= LOOP_SCHEDULE[preset].intervalMinutes;
 	}
 	if (!goal) throw new HttpError(400, "goal is required");
 	return {
@@ -126,7 +126,7 @@ export function resolveLoopSpec(body: LoopRequest): LoopSpec {
 /** A new loop record. The caller creates its task and stores it. */
 export function newLoop(input: { id: string; session: string; spec: LoopSpec; defaults: LoopDefaults; costAtStart: number; now: number }): Loop {
 	const { spec, defaults } = input;
-	const schedule = spec.preset === undefined ? undefined : CLEANUP_SCHEDULE[spec.preset];
+	const schedule = spec.preset === undefined ? undefined : LOOP_SCHEDULE[spec.preset];
 	return {
 		id: input.id,
 		session: input.session,
@@ -156,14 +156,18 @@ export function stopPatch(action: "pause" | "stop"): { status: "done" | "paused"
 	return action === "stop" ? { status: "done", note: "stopped by user" } : { status: "paused", note: "paused by user" };
 }
 
-/** An active loop already has a task: resuming it would start a second one. */
-export function assertResumable(loop: Pick<Loop, "id" | "status">): void {
-	if (loop.status === "active") throw new HttpError(409, `loop ${loop.id} is already active`);
+/** An active, awake loop already has a task: resuming it would start a second one. A dormant one is woken. */
+export function assertResumable(loop: Pick<Loop, "id" | "status" | "dormant">): void {
+	if (loop.status === "active" && loop.dormant === undefined) throw new HttpError(409, `loop ${loop.id} is already active`);
 }
 
 /** Resume: a fresh budget window, scheduled now. Mutates the loop it is given (a draft); the caller sets `taskId`. */
 export function applyResume(loop: Loop, cost: number, now: number): void {
 	Object.assign(loop, { status: "active", note: "resumed", nextRunAt: now });
+	// Resuming is also how a person wakes a dormant loop.
+	delete loop.dormant;
+	delete loop.idleReported;
+	loop.noopStreak = 0;
 	loop.costAtStart = cost;
 	// A resumed loop gets a fresh budget window.
 	loop.spent = 0;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CHECKS_RECHECK_MINUTES, CLEANUP_PROMPTS, CLEANUP_SCHEDULE, IDLE_RECHECK_MINUTES, shouldWake } from "../src/loopgate.ts";
+import { AUTO_DORMANT_AFTER, afterIteration, CHECKS_RECHECK_MINUTES, CLEANUP_PROMPTS, CLEANUP_SCHEDULE, DORMANT_RECHECK_MINUTES, IDLE_RECHECK_MINUTES, shouldWake, workFingerprint } from "../src/loopgate.ts";
 import type { GateLoop, GatePr, GateRepo } from "../src/loopgate.ts";
 
 const HOUR = 3_600_000;
@@ -154,7 +154,8 @@ describe("CLEANUP_PROMPTS", () => {
 	for (const name of names) {
 		it(`${name}: ends with the one-PR rule and loop_report`, () => {
 			const prompt = CLEANUP_PROMPTS[name];
-			assert.ok(prompt.trimEnd().endsWith("open at most ONE PR, or none if nothing to do; finish with loop_report."));
+			assert.ok(prompt.includes("open at most ONE PR, or none if nothing to do; finish with loop_report."));
+			assert.ok(prompt.trimEnd().endsWith('report status "idle" so the loop sleeps until the repo changes.'));
 			assert.ok(prompt.length > 400 && prompt.length < 4000);
 		});
 
@@ -186,5 +187,61 @@ describe("CLEANUP_PROMPTS", () => {
 		assert.equal(CLEANUP_SCHEDULE["legacy-reaper"].intervalMinutes, 10080);
 		assert.equal(CLEANUP_SCHEDULE["legacy-reaper"].skipIfIdleHours, 168);
 		assert.equal(CLEANUP_SCHEDULE["friction-sweep"].kind, "friction-sweep");
+	});
+});
+
+describe("dormant loops", () => {
+	const asleep = (change: Partial<GateRepo> = {}) => ({ fingerprint: workFingerprint(repo(change)), since: ago(10) });
+
+	it("sleep without a model call while nothing changed, and look again in hours", () => {
+		for (const kind of ["goal", "cleanup", "friction-sweep"] as const) {
+			const decision = wake({ kind, dormant: asleep({ openIssuesKey: "2:x" }) }, { openIssuesKey: "2:x", openFrictionIssues: 4 });
+			assert.equal(decision.wake, false, kind);
+			assert.equal(decision.nextCheckMinutes, DORMANT_RECHECK_MINUTES);
+			assert.match(decision.reason, /dormant/);
+		}
+	});
+
+	it("wake on a new base commit, PR activity, or a new or edited issue", () => {
+		const dormant = asleep({ openIssuesKey: "2:x" });
+		assert.equal(wake({ dormant }, { openIssuesKey: "2:x", baseHeadSha: "ccc" }).wake, true);
+		assert.equal(wake({ dormant }, { openIssuesKey: "2:x", openAgentPrs: [pr(9, "pass")] }).wake, true);
+		assert.equal(wake({ dormant }, { openIssuesKey: "3:y" }).wake, true);
+		assert.equal(wake({ dormant }, { openIssuesKey: "2:z" }).wake, true);
+	});
+
+	it("still wait for running checks before anything else", () => {
+		const decision = wake({ dormant: asleep() }, { openAgentPrs: [pr(1, "pending")] });
+		assert.equal(decision.wake, false);
+		assert.equal(decision.nextCheckMinutes, CHECKS_RECHECK_MINUTES);
+	});
+});
+
+describe("workFingerprint", () => {
+	it("ignores PR order but sees a new PR head", () => {
+		const a = workFingerprint(repo({ openAgentPrs: [pr(1, "pass"), pr(2, "fail")] }));
+		assert.equal(a, workFingerprint(repo({ openAgentPrs: [pr(2, "pass"), pr(1, "pass")] })), "checks state is not work");
+		assert.notEqual(a, workFingerprint(repo({ openAgentPrs: [pr(1, "pass", { headSha: "new" }), pr(2, "fail")] })));
+	});
+});
+
+describe("afterIteration", () => {
+	it("counts iterations that changed nothing and sleeps after a few", () => {
+		let streak = 0;
+		for (let i = 1; i < AUTO_DORMANT_AFTER; i++) {
+			const next = afterIteration({ before: "f", after: "f", streak, idleReported: false });
+			assert.equal(next.dormant, false);
+			streak = next.streak;
+		}
+		assert.deepEqual(afterIteration({ before: "f", after: "f", streak, idleReported: false }), { streak: AUTO_DORMANT_AFTER, dormant: true });
+	});
+
+	it("resets on any change, and never counts what it cannot see", () => {
+		assert.deepEqual(afterIteration({ before: "f", after: "g", streak: 2, idleReported: false }), { streak: 0, dormant: false });
+		assert.deepEqual(afterIteration({ before: undefined, after: "g", streak: 2, idleReported: false }), { streak: 0, dormant: false });
+	});
+
+	it("sleeps at once when the agent reports idle, even if it did some work", () => {
+		assert.equal(afterIteration({ before: "f", after: "g", streak: 0, idleReported: true }).dormant, true);
 	});
 });

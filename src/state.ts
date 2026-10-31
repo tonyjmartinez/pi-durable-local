@@ -48,6 +48,8 @@ export type Loop = {
 	id: string;
 	session: string;
 	goal: string;
+	/** Compact next work item, supplied by loop_report for the next fresh iteration. */
+	nextTask?: string;
 	intervalMinutes: number;
 	maxIterations: number;
 	budgetUsd: number;
@@ -75,6 +77,12 @@ export type Loop = {
 	lastSeenBaseSha?: string;
 	/** Ticks skipped without a model call, for status. */
 	skipped?: number;
+	/** Asleep because it ran out of work: wakes only when the repo's work fingerprint changes, or on resume. */
+	dormant?: { fingerprint: string; since: number };
+	/** Consecutive completed iterations that changed nothing on GitHub. */
+	noopStreak?: number;
+	/** The agent's last loop_report said "idle"; the iteration's end puts the loop to sleep. */
+	idleReported?: boolean;
 };
 
 export const Loops = defineDoc<{ byId: Record<string, Loop>; nextId: number }>({

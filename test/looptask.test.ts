@@ -140,7 +140,7 @@ const BASE_SHA = "b".repeat(40);
 const recent = () => new Date(Date.now() - 2 * 3_600_000).toISOString();
 
 /** Script the GitHub reads the loop gate makes. */
-function gate(options: { baseSha?: string; at?: string; prs?: { number: number; sha: string; branch?: string; check: "success" | "in_progress" | "failure" }[]; frictionIssues?: number; baseFails?: boolean } = {}) {
+function gate(options: { baseSha?: string; at?: string; prs?: { number: number; sha: string; branch?: string; check: "success" | "in_progress" | "failure" }[]; frictionIssues?: number; baseFails?: boolean; issues?: { updatedAt: string }[] } = {}) {
 	const prs = options.prs ?? [];
 	gh.script([
 		{ match: "^repo view o/r --json defaultBranchRef", responses: ["main\n"] },
@@ -153,6 +153,7 @@ function gate(options: { baseSha?: string; at?: string; prs?: { number: number; 
 		})),
 		{ match: "/status\\?per_page=100$", responses: [JSON.stringify({ statuses: [] })] },
 		{ match: "^issue list --repo o/r --label friction", responses: [`${options.frictionIssues ?? 0}\n`] },
+		{ match: "^issue list --repo o/r --state open --limit 200", responses: [JSON.stringify(options.issues ?? [])] },
 	]);
 }
 
@@ -381,7 +382,7 @@ describe("run phase: the skip gate", () => {
 		gate();
 		await run();
 		assert.equal(submits.length, 1);
-		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0, costBefore: 0, baseSha: BASE_SHA } }]);
+		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0, costBefore: 0, baseSha: BASE_SHA, fingerprint: `${BASE_SHA}||0:` } }]);
 		assert.equal(loopDoc()!.lastSeenBaseSha, undefined, "recorded only once the iteration succeeds");
 	});
 
@@ -499,6 +500,36 @@ describe("await phase", () => {
 		near(loop.lastRunAt!, before);
 		near(loop.nextRunAt!, before + 30 * 60_000);
 		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "wait" } }]);
+	});
+
+	it("puts the loop to sleep when the agent reported idle, keyed to the repo as it ended", async () => {
+		setup({ loop: { idleReported: true }, remote: REMOTE });
+		sent();
+		gate({ baseSha: BASE_SHA });
+		await wait({ phase: "await", iteration: 0, baseSha: BASE_SHA, fingerprint: `${BASE_SHA}||0:` });
+		const loop = loopDoc()!;
+		assert.equal(loop.status, "active", "dormant loops stay scheduled so the gate can wake them");
+		assert.equal(loop.dormant?.fingerprint, `${BASE_SHA}||0:`);
+		assert.equal(loop.idleReported, undefined);
+		assert.match(loop.note, /^dormant: nothing left to do/);
+	});
+
+	it("puts the loop to sleep on its own after iterations that changed nothing", async () => {
+		setup({ loop: { noopStreak: 2 }, remote: REMOTE });
+		sent();
+		gate({ baseSha: BASE_SHA });
+		await wait({ phase: "await", iteration: 0, fingerprint: `${BASE_SHA}||0:` });
+		assert.equal(loopDoc()!.noopStreak, 3);
+		assert.match(loopDoc()!.note, /^dormant: 3 iterations changed nothing/);
+	});
+
+	it("resets the streak when the iteration changed something", async () => {
+		setup({ loop: { noopStreak: 2 }, remote: REMOTE });
+		sent();
+		gate({ baseSha: BASE_SHA, prs: [{ number: 4, sha: "c".repeat(40), check: "success" }] });
+		await wait({ phase: "await", iteration: 0, fingerprint: `${BASE_SHA}||0:` });
+		assert.equal(loopDoc()!.noopStreak, 0);
+		assert.equal(loopDoc()!.dormant, undefined);
 	});
 
 	it("records the base commit it saw only when the iteration completed", async () => {
@@ -779,12 +810,14 @@ describe("fresh context per iteration", () => {
 		assert.equal(submits.length, 1);
 	});
 
-	it("does not reset while the session is busy with a run that is not a background task", async () => {
+	it("defers a busy session without queuing or counting another paid iteration", async () => {
 		setup({ remote: null });
 		busyTasks = [{ record: { background: false, conversationId: 1 } }];
 		await run();
 		assert.equal(resets.length, 0);
-		assert.equal(submits.length, 1);
+		assert.equal(submits.length, 0);
+		assert.equal(loopDoc()!.iteration, 0);
+		assert.equal(loopDoc()!.note, "waiting: session already busy");
 	});
 
 	it("is not stopped by background tasks, such as the loop's own, or by another session's run", async () => {
@@ -878,6 +911,7 @@ describe("fresh context per iteration", () => {
 
 describe("two loops on one session", () => {
 	const seedTwo = (change: Partial<Loop> = {}) => {
+		setPolicy({ dailyBudgetUsd: 0 }); // This suite isolates per-loop accounting from the shared cap.
 		store.seed(Loops, { byId: { L1: baseLoop(), L2: baseLoop({ id: "L2", goal: "A different goal", ...change }) }, nextId: 3 });
 		setup({ loop: null, remote: null });
 	};
@@ -1009,4 +1043,22 @@ describe("whole iterations", () => {
 		assert.equal(directives[0]!.status, "terminal");
 		assert.equal(submits.length, 1);
 	});
+});
+
+describe("compact next-task handoffs", () => {
+ it("carries the next slice into a fresh context without copying an unbounded task", () => {
+  const nextTask = "Update arena renderer; preserve collision sizes. " + "x".repeat(3000);
+  const handoff = ext.loopHandoff(baseLoop({ nextTask }), []);
+  assert.ok(handoff.includes("Next work item: Update arena renderer"));
+  assert.ok(handoff.length < 1800);
+ });
+});
+describe("memory context cost", () => {
+ it("excerpts long injected records without changing stored instructions", () => {
+  const memory = { id: "1", topic: "Visual direction", text: "a".repeat(8000), tags: [], by: "owner", updatedAt: 1 };
+  const line = ext.memoryPromptLine(memory);
+  assert.ok(line.length < 1300);
+  assert.match(line, /memory_search/);
+  assert.equal(memory.text.length, 8000);
+ });
 });

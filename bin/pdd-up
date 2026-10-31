@@ -7,6 +7,8 @@ DATA="${PD_DATA_DIR:-$HOME/.local/share/pi-durable}"
 PIDFILE="$DATA/pdd.pid"
 LOG="$DATA/pdd.log"
 NODE="$(command -v node || echo "$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | tail -1)/bin/node")"
+# Keep the daemon CLI's install directory available when started from a minimal shell.
+export PATH="$HOME/.local/bin:$PATH"
 umask 077
 mkdir -p "$DATA"
 

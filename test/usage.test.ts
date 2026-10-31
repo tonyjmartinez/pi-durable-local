@@ -307,7 +307,8 @@ describe("web_search reports what the search cost", () => {
 		assert.ok(headers.authorization === "Bearer test-key" || headers["x-api-key"] === "test-key", JSON.stringify(Object.keys(headers)));
 		assert.equal(body.model, "claude-haiku-5-5");
 		assert.equal(body.tools[0].type, "web_search_20260209");
-		assert.equal(body.tools[0].max_uses, 5);
+		assert.equal(body.tools[0].max_uses, 2);
+		assert.equal(body.max_tokens, 4096);
 		assert.match(body.messages[0].content, /ponytail palm height/);
 	});
 
@@ -375,24 +376,24 @@ describe("web_search reports what the search cost", () => {
 			close((await execute({ query: "q" }, withModels(catalog), context)).usage!.cost.total, 0.01 + 0.005);
 		});
 
-		it("adds up the turns of a search that paused and was continued", async () => {
+		it("returns a labeled partial result without paying for continuation requests", async () => {
 			replies = [
-				{ body: message({ text: "First part. ", stop: "pause_turn", usage: { input_tokens: 1_000, output_tokens: 100, server_tool_use: { web_search_requests: 2 } } }) },
-				{ body: message({ text: "Second part.", usage: { input_tokens: 2_000, output_tokens: 300, server_tool_use: { web_search_requests: 1 } } }) },
+				{ body: message({ text: "First part.", stop: "pause_turn", usage: { input_tokens: 1000, output_tokens: 100, server_tool_use: { web_search_requests: 2 } } }) },
+				{ body: message({ text: "Should not be called." }) },
 			];
 			const result = await execute({ query: "q" }, withModels(catalog), context);
-			assert.equal(requests.length, 2);
-			assert.deepEqual(requests[1]!.body.messages.map((m: { role: string }) => m.role), ["user", "assistant"]);
-			assert.match(result.output[0]!.text, /^First part\. Second part\./);
-			assert.deepEqual([result.usage!.input, result.usage!.output], [3_000, 400]);
-			close(result.usage!.cost.total, (1 / 1e6) * 3_000 + (5 / 1e6) * 400 + 3 * 0.01);
+			assert.equal(requests.length, 1);
+			assert.match(result.output[0]!.text, /First part/);
+			assert.match(result.output[0]!.text, /Incomplete search/);
+			assert.deepEqual([result.usage!.input, result.usage!.output], [1000, 100]);
+			close(result.usage!.cost.total, 0.001 + 0.0005 + 0.02);
 		});
 
-		it("gives up on a search that never stops pausing, after three requests", async () => {
-			replies = [{ body: message({ stop: "pause_turn" }) }];
+		it("labels a token-limited answer instead of presenting it as complete", async () => {
+			replies = [{ body: message({ stop: "max_tokens" }) }];
 			const result = await execute({ query: "q" }, withModels(catalog), context);
-			assert.equal(requests.length, 3);
-			assert.equal(result.usage!.input, 30_000, "all three turns were paid for");
+			assert.equal(requests.length, 1);
+			assert.match(result.output[0]!.text, /Incomplete search/);
 		});
 	});
 

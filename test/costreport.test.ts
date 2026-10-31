@@ -169,6 +169,29 @@ describe("analyzeTranscript", () => {
 describe("findings", () => {
 	const turn = (ctx: number, cost: [number, number, number, number] = [0, 0, 0, 0.01]) => assistant(usage(ctx, 0, 0, 1, cost));
 
+	it("flags a long iteration by turns, rather than claiming elapsed time", () => {
+		const report = analyzeTranscript([tick("L1", 0), ...Array.from({ length: 40 }, () => turn(100))]);
+		assert.match(report.findings.join("\n"), /L1#1 used 40 assistant turns/);
+		assert.doesNotMatch(analyzeTranscript([tick("L1", 0), ...Array.from({ length: 39 }, () => turn(100))]).findings.join("\n"), /assistant turns/);
+	});
+
+	it("flags one oversized shell result, not many small outputs or a large non-shell result", () => {
+		const report = analyzeTranscript([tick("L2", 1), assistant(undefined, [["a", "bash"], ["b", "web_fetch"]]), result("a", "x".repeat(20_001)), result("b", "y".repeat(30_000))]);
+		assert.match(report.findings.join("\n"), /L2#2 had a shell result of 20,001 characters/);
+		const small = analyzeTranscript([tick("L2", 1), assistant(undefined, [["a", "bash"], ["b", "bash"]]), result("a", "x".repeat(15_000)), result("b", "x".repeat(15_000))]);
+		assert.doesNotMatch(small.findings.join("\n"), /had a shell result/);
+	});
+
+	it("flags repeated review-bearing ticks for the same PR but not ordinary CI polls or other PRs", () => {
+		const call = (id: string, number: number): TranscriptEntry => ({ kind: "pi.assistant", model: [{ content: [{ type: "toolCall", id, name: "pr_tick", arguments: { number } }] }] });
+		const tickResult = (id: string, paid: boolean): TranscriptEntry => ({ kind: "pi.tool-result", model: [{ toolCallId: id, content: "done", ...(paid ? { usage: usage(10, 0, 0, 1, [0.01, 0, 0, 0]) } : {}) }] });
+		const report = analyzeTranscript([tick("L3", 0), call("a", 26), tickResult("a", true), call("b", 26), tickResult("b", false), call("c", 25), tickResult("c", true), call("d", 26), tickResult("d", true)]);
+		assert.match(report.findings.join("\n"), /PR #26 had 2 review-bearing pr_tick calls across 1 segment/);
+		assert.doesNotMatch(report.findings.join("\n"), /PR #25/);
+		const separate = analyzeTranscript([tick("L3", 0), call("a", 26), tickResult("a", true), tick("L3", 1), call("b", 26), tickResult("b", true)]);
+		assert.match(separate.findings.join("\n"), /PR #26 had 2 review-bearing pr_tick calls across 2 segments/);
+	});
+
 	it("flags a history that dwarfs the prefix, with what it cost to re-read", () => {
 		const report = analyzeTranscript([assistant(usage(3_000, 0, 0, 1, [0, 0, 0, 0])), tick("L1", 0), turn(48_000, [0.2, 0, 0, 0.01]), turn(48_100)]);
 		assert.match(report.findings[0] ?? "", /started with 48,000 tokens of history \(the bare prefix is 3,000\)/);

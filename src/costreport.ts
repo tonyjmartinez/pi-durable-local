@@ -10,7 +10,7 @@ export type UsageLike = {
 	cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
 };
 
-type Block = { type?: string; name?: string; id?: string; text?: string };
+type Block = { type?: string; name?: string; id?: string; text?: string; arguments?: unknown };
 type Message = { content?: unknown; usage?: UsageLike; model?: string; toolCallId?: string };
 /** A transcript entry as the daemon streams it: a kind, the model messages, and for loop ticks some data. */
 export type TranscriptEntry = { kind: string; model?: Message[]; data?: Record<string, unknown> };
@@ -33,6 +33,10 @@ export type Segment = {
 	reingestCost: number;
 	models: Record<string, number>;
 	tools: Record<string, { calls: number; resultChars: number }>;
+	/** Largest single shell result, not the sum of many small results. */
+	maxShellResultChars?: number;
+	/** pr_tick results carrying model usage, grouped by PR number. */
+	paidReviewTicks?: Record<string, number>;
 };
 
 export type CostReport = {
@@ -68,7 +72,7 @@ function addTo(target: Money, cost: UsageLike["cost"]): void {
 /** Split at each loop tick; entries before the first tick form one segment of their own when the agent spoke in them. */
 export function analyzeTranscript(entries: readonly TranscriptEntry[]): CostReport {
 	const segments: Segment[] = [];
-	const toolNames = new Map<string, string>();
+	const toolCalls = new Map<string, { name: string; prNumber?: number }>();
 	let current: Segment | undefined;
 	let firstTwo: number[] = [];
 	let prefixTokens: number | undefined;
@@ -107,14 +111,26 @@ export function analyzeTranscript(entries: readonly TranscriptEntry[]): CostRepo
 			for (const block of Array.isArray(message.content) ? (message.content as Block[]) : []) {
 				if (block?.type !== "toolCall" || typeof block.name !== "string") continue;
 				segment.toolCalls++;
-				if (typeof block.id === "string") toolNames.set(block.id, block.name);
+				if (typeof block.id === "string") {
+					const args = block.arguments;
+					const number = args !== null && typeof args === "object" ? (args as Record<string, unknown>).number : undefined;
+					toolCalls.set(block.id, { name: block.name, ...(block.name === "pr_tick" && typeof number === "number" && Number.isInteger(number) && number > 0 ? { prNumber: number } : {}) });
+				}
 				const tool = (segment.tools[block.name] ??= { calls: 0, resultChars: 0 });
 				tool.calls++;
 			}
 		} else if (entry.kind === "pi.tool-result" && message !== undefined && current !== undefined) {
-			const name = toolNames.get(message.toolCallId ?? "") ?? "(unknown)";
+			const call = toolCalls.get(message.toolCallId ?? "");
+			const name = call?.name ?? "(unknown)";
 			const tool = (current.tools[name] ??= { calls: 0, resultChars: 0 });
-			tool.resultChars += textLength(message.content);
+			const chars = textLength(message.content);
+			tool.resultChars += chars;
+			if (name === "bash") current.maxShellResultChars = Math.max(current.maxShellResultChars ?? 0, chars);
+			if (name === "pr_tick" && call?.prNumber !== undefined && message.usage !== undefined &&
+				(contextTokens(message.usage) > 0 || num(message.usage.output) > 0 || num(message.usage.cost?.total) > 0)) {
+				const paid = (current.paidReviewTicks ??= {});
+				paid[call.prNumber] = (paid[call.prNumber] ?? 0) + 1;
+			}
 		}
 	}
 
@@ -141,6 +157,21 @@ export function findings(report: Pick<CostReport, "segments" | "prefixTokens" | 
 	const out: string[] = [];
 	const loops = report.segments.filter((segment) => segment.iteration !== undefined);
 	const last = loops.at(-1);
+	const reviewTicks = new Map<string, { calls: number; segments: number }>();
+	for (const segment of report.segments) {
+		const label = segment.iteration === undefined ? "(no loop)" : `${segment.loopId ?? "?"}#${segment.iteration + 1}`;
+		if (segment.iteration !== undefined && segment.turns >= 40) out.push(`${label} used ${count(segment.turns)} assistant turns; consider splitting the work into smaller iterations.`);
+		if ((segment.maxShellResultChars ?? 0) > 20_000) out.push(`${label} had a shell result of ${count(segment.maxShellResultChars!)} characters; narrow command output to reduce context.`);
+		for (const [pr, ticks] of Object.entries(segment.paidReviewTicks ?? {})) {
+			const total = reviewTicks.get(pr) ?? { calls: 0, segments: 0 };
+			total.calls += ticks;
+			total.segments++;
+			reviewTicks.set(pr, total);
+		}
+	}
+	for (const [pr, { calls, segments }] of reviewTicks) {
+		if (calls >= 2) out.push(`PR #${pr} had ${calls} review-bearing pr_tick calls across ${segments} ${segments === 1 ? "segment" : "segments"}; check whether repeated reviews were necessary. Reviews may be needed after changes.`);
+	}
 	if (last !== undefined && report.prefixTokens !== undefined && last.startContext > Math.max(20_000, report.prefixTokens * 4)) {
 		out.push(
 			`The latest iteration started with ${count(last.startContext)} tokens of history (the bare prefix is ${count(report.prefixTokens)}) and spent ${usd(last.reingestCost)} of its ${usd(last.cost.total)} re-reading it in its first two turns. A fresh context per iteration would start near the prefix.`,

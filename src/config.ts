@@ -48,6 +48,8 @@ export type Policy = {
 		freshContext: boolean;
 		/** Cap on all loops' spend together in any 24 hours, in USD; loops wait for room when it is reached. 0 = no cap. */
 		dailyBudgetUsd: number;
+		/** Optional one-time budget start in epoch milliseconds; historical spend remains recorded. */
+		dailyBudgetSince?: number;
 		/** Hard cap on spend per loop, in USD; the loop pauses when crossed. */
 		defaultBudgetUsd: number;
 		defaultIntervalMinutes: number;
@@ -56,13 +58,13 @@ export type Policy = {
 };
 
 export const DEFAULT_POLICY: Policy = {
-	model: "anthropic/claude-sonnet-5-5",
-	reviewModel: "anthropic/claude-opus-5-5",
+	model: "anthropic/claude-haiku-5-5",
+	reviewModel: "anthropic/claude-haiku-5-5",
 	searchModel: "anthropic/claude-haiku-5-5",
 	subagentModel: "anthropic/claude-haiku-5-5",
-	planModel: "anthropic/claude-sonnet-5-5",
-	deepModel: "anthropic/claude-opus-5-5",
-	thinkingLevel: "medium",
+	planModel: "anthropic/claude-haiku-5-5",
+	deepModel: "anthropic/claude-sonnet-5-5",
+	thinkingLevel: "low",
 	writableRoots: [join(home, "proj"), "/tmp"],
 	automerge: {
 		repos: [],
@@ -114,7 +116,7 @@ export const DEFAULT_POLICY: Policy = {
 		requireChecks: true,
 		mergeMethod: "squash",
 	},
-	loops: { freshContext: true, dailyBudgetUsd: 10, defaultBudgetUsd: 5, defaultIntervalMinutes: 60, defaultMaxIterations: 24 },
+	loops: { freshContext: true, dailyBudgetUsd: 1, defaultBudgetUsd: 100, defaultIntervalMinutes: 30, defaultMaxIterations: 17520 },
 };
 
 export function ensureDirs(): void {
@@ -173,6 +175,14 @@ export function scrubbedEnv(): NodeJS.ProcessEnv {
 	mkdirSync(agentGh, { recursive: true, mode: 0o700 });
 	env.GH_CONFIG_DIR = agentGh;
 	env.GH_PROMPT_DISABLED = "1";
+ // Optional local test runtime; keep game repositories free of browser dependencies.
+ const browser = join(home, ".cache", "pi-durable-browser", "chromium");
+ if (existsSync(browser)) {
+  env.CHROMIUM ??= browser;
+  env.PW_CHROMIUM ??= browser;
+  const modules = join(home, ".cache", "pi-durable-browser", "node_modules");
+  if (existsSync(modules)) env.NODE_PATH = [modules, env.NODE_PATH].filter(Boolean).join(":");
+ }
 	return env;
 }
 

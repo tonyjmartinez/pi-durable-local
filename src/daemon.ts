@@ -192,7 +192,7 @@ async function status() {
  * The factory's front door: clone a GitHub repo with the daemon's credentials (agents have none), register a session
  * for it, and optionally start a loop on a goal.
  */
-async function startProject(body: { repo?: string; name?: string; purpose?: string; goal?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number; baseBranch?: string; merge?: boolean }) {
+async function startProject(body: { repo?: string; name?: string; purpose?: string; goal?: string; preset?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number; baseBranch?: string; merge?: boolean }) {
 	const { repo, name: repoName } = parseRepo(body.repo);
 	const name = projectSessionName(repoName, body.name);
 	const dir = projectDir(loadPolicy().writableRoots[0]!, repoName, process.env.HOME!);
@@ -206,14 +206,14 @@ async function startProject(body: { repo?: string; name?: string; purpose?: stri
 	if (changed?.mergeEnabled) audit("automerge_enabled", { repo, by: "pd factory --merge" });
 	const existing = (await harness.snapshot(Sessions, context))?.byName[name];
 	const session = existing === undefined ? await createSession({ name, cwd: dir, purpose: body.purpose ?? `${repo}` }) : { name, cwd: existing.cwd };
-	const loop = body.goal ? await startLoop({ session: name, goal: body.goal, intervalMinutes: body.intervalMinutes, maxIterations: body.maxIterations, budgetUsd: body.budgetUsd }) : undefined;
+	const loop = body.goal || body.preset ? await startLoop({ session: name, goal: body.goal, preset: body.preset, intervalMinutes: body.intervalMinutes, maxIterations: body.maxIterations, budgetUsd: body.budgetUsd }) : undefined;
 	return { session, loop };
 }
 
 async function startLoop(body: { session?: string; goal?: string; preset?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number }) {
 	const policy = loadPolicy();
 	const { conversation } = await sessionByName(String(body.session ?? ""));
-	// A preset is one of the cleanup automations: its own brief, schedule, and idle gate.
+	// A preset supplies its own brief and cadence; the preset kind controls its idle gate.
 	const spec = resolveLoopSpec(body);
 	// The budget window starts at the session's spend including its subagents, the same measure the loop checks.
 	const costAtStart = await sessionCost(harness, String(body.session), conversation.id, context);

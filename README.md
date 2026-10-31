@@ -5,7 +5,7 @@ A small, portable software factory: durable coding-agent sessions that keep runn
 One daemon, `pdd`, owns a pi-durable SQLite store at `~/.local/share/pi-durable/state.sqlite`. A small client, `pd`, talks to it over a Unix socket (`~/.local/share/pi-durable/pdd.sock`, mode 0600). Everything lives in the daemon:
 
 - **Named sessions.** Each is a long-running agent conversation with its own working directory and purpose. They survive restarts and crashes; the daemon resumes from the last committed step.
-- **A model ladder.** Sessions run on Sonnet; cheap work is delegated to Haiku subagents; Opus is reserved for review and a few audited big decisions.
+- **A model ladder.** Routine sessions, planning, search, and reviews use Haiku. The `deep` subagent tier uses Sonnet; pi never runs Opus. Iterations start with fresh context, keep command output bounded, and are prompted to stop after 12 substantive turns.
 - **A ship loop.** Agents open PRs from a template, and a deterministic state machine (`pr_tick`) says what to do next, runs an independent review, and merges low and medium risk changes that pass every gate. Anything riskier waits for you.
 - **Loops.** A session can be woken on an interval to push a goal forward, within a dollar budget and an iteration cap. A gate decides in code, before any model runs, whether a tick is worth it.
 - **Shared memory.** One durable document that every session reads in its system prompt and writes through `memory_save`, `memory_search`, and `memory_forget`.
@@ -46,8 +46,8 @@ Why not systemd: on WSL, WSLg mounts its own tmpfs over `/run/user/$UID`, which 
 ## Daily use
 
 ```
-pd factory <owner/repo> ["goal"] [--base main] [--merge] [--every 60] [--max 24] [--budget 5] [--name n]
-                                          clone, create a session, and (with a goal) start a loop
+pd factory <owner/repo> ["goal"] [--preset product-gardener] [--base main] [--merge] [--name n]
+                                          clone, create a session, and (with a goal or preset) start a loop
 pd status                                 sessions, loops, spend, parked tasks
 pd new <name> --cwd <dir> [--purpose "..."] [--model provider/id]
 pd attach <name>                          live view and chat
@@ -56,10 +56,10 @@ pd rm <name>                              remove a session (its history stays in
 pd ui [--rotate]                          local web UI on 127.0.0.1:7777 (PD_UI_PORT); prints a login link
 pd tmux [names...]                        tmux session "pd": status window plus one window per session
 
-pd loop start <session> "goal" [--every 60] [--max 24] [--budget 5]
-pd loop start <session> --preset keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
+pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
+pd loop start <session> --preset product-gardener|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
 pd loop ls | pause <id> | resume <id> | stop <id>
-pd loop set <id> [--every 60] [--max 24] [--budget 5]
+pd loop set <id> [--every 30] [--max 17520] [--budget 100]
 
 pd mem [search words]                     shared memory
 pd mem add "topic" "fact" [--project <dir>]
@@ -74,7 +74,7 @@ pd doctor                                 check setup
 
 `pd` with no arguments is `pd status`. Session names are letters, digits, `.`, `_`, `-` (max 41 characters). Without `--cwd`, `pd new` uses your current directory.
 
-`pd factory owner/repo` is the quick path to a working project: it clones `git@github.com:owner/repo.git` into the first writable root (`~/proj/<repo>` by default) with git hooks disabled, creates a session named after the repo, and, if you pass a goal, starts a loop. `--base` records the branch PRs should target in the policy when the GitHub default is not the deploy branch. `--merge` adds the repo to `automerge.repos`, which allows gated merges there; the command you typed is the approval, and it is audited as `automerge_enabled`. Without `--merge`, PRs in the repo park as `no-merge-authority` until you add it yourself (see Policy).
+`pd factory owner/repo` is the quick path to a working project: it clones `git@github.com:owner/repo.git` into the first writable root (`~/proj/<repo>` by default) with git hooks disabled, creates a session named after the repo, and, if you pass a goal or --preset product-gardener, starts a loop. The preset chooses one evidence-based product or developer-experience improvement per half-hour iteration; --merge remains a separate explicit opt-in. `--base` records the branch PRs should target in the policy when the GitHub default is not the deploy branch. `--merge` adds the repo to `automerge.repos`, which allows gated merges there; the command you typed is the approval, and it is audited as `automerge_enabled`. Without `--merge`, PRs in the repo park as `no-merge-authority` until you add it yourself (see Policy).
 
 Inside `pd attach`, plain text is sent as a message (queued if the agent is busy). Slash commands:
 
@@ -97,12 +97,12 @@ It is a proxy to the daemon's socket, not a second owner of the store: only an a
 
 | Role | Policy key | Default |
 | --- | --- | --- |
-| Session (the agent you attach to) | `model` | `anthropic/claude-sonnet-5-5` |
+| Session (the agent you attach to) | `model` | `anthropic/claude-haiku-5-5` |
 | Subagent tier `fast` (default) | `subagentModel` | `anthropic/claude-haiku-5-5` |
-| Subagent tier `plan` | `planModel` | `anthropic/claude-sonnet-5-5` |
-| Subagent tier `deep` | `deepModel` | `anthropic/claude-opus-5-5` |
-| Independent PR reviewer | `reviewModel` | `anthropic/claude-opus-5-5` |
-| `web_search` | `searchModel` | `anthropic/claude-opus-5-5` |
+| Subagent tier `plan` | `planModel` | `anthropic/claude-haiku-5-5` |
+| Subagent tier `deep` | `deepModel` | `anthropic/claude-sonnet-5-5` |
+| Independent PR reviewer | `reviewModel` | `anthropic/claude-haiku-5-5` |
+| `web_search` | `searchModel` | `anthropic/claude-haiku-5-5` |
 
 A session delegates with the `subagent` tool: one focused, self-contained task to a cheaper model that works in the same directory under the same sandbox. `fast` is for research, scoped implementation, tests and diagnosing checks; `plan` is for product decisions and deciding what to build next; `deep` is for a big swing or a design decision and requires a `why`, which is written to the audit log with the model used. Subagents cannot push, open or merge PRs, or message other sessions; their parent does that. Their spend counts toward the parent's loop budget.
 
@@ -137,7 +137,7 @@ The reasons that always park a PR for a human are: it comes from a fork; its aut
 
 **CI.** Only GitHub Actions check runs on the exact head commit count as a pass. Commit statuses and check runs from other apps can block a PR but never pass it, because anyone with a token can post one. Each check name carries its source (`name [app-slug]` for another app's check run, `context [commit status]` for a status). If the only failing checks are from outside GitHub Actions, such as a Cloudflare build that fails on every branch, the agent is not asked to fix them: the PR parks for you with those check names listed. It stays blocked and is never ignored. A failing Actions check next to an external one is still the agent's to fix. All pages of check runs are read, not just the first 100. For 90 seconds after the daemon pushes a commit, the tick adds a synthetic pending check, because right after a push only the fastest workflow may have registered and its green must not be mistaken for all of CI.
 
-**The independent review.** A separate Opus call (`reviewModel`) reads the title, description and diff and replies with a JSON verdict. It is told to treat all three as untrusted data written by the agent under review. The PR text is placed inside a random per-call delimiter the PR cannot forge. The diff is fetched for the exact head commit being keyed (a compare against the base), and if the head, title or description changes while the review runs, the tick fails and reviews again, so a verdict can never be stored for a commit it did not read. A diff over 200,000 characters is rejected as too large to review, never truncated. Conflicting verdicts are a rejection. A reply with no verdict at all is a failed review: the tick errors, nothing is cached, and the next tick retries. The verdict is cached per exact head commit plus a hash of the title and description, so it runs once per state of the PR and runs again after any push or `pr_edit`.
+**The independent review.** A separate model call (`reviewModel`, Haiku by default) reads the title, description and diff and replies with a JSON verdict. It is told to treat all three as untrusted data written by the agent under review. The PR text is placed inside a random per-call delimiter the PR cannot forge. The diff is fetched for the exact head commit being keyed (a compare against the base), and if the head, title or description changes while the review runs, the tick fails and reviews again, so a verdict can never be stored for a commit it did not read. A diff over 200,000 characters is rejected as too large to review, never truncated. Conflicting verdicts are a rejection. A reply with no verdict at all is a failed review: the tick errors, nothing is cached, and the next tick retries. The verdict is cached per exact head commit plus a hash of the title and description, so it runs once per state of the PR and runs again after any push or `pr_edit`.
 
 **The merge.** A squash merge (or the configured method) pinned to the head commit that was checked (`--match-head-commit`), with the branch deleted. If the branch moved after the check, the merge fails and the next tick starts over.
 
@@ -153,11 +153,29 @@ The state machine's `decide()` design, and the idea of one deterministic next ac
 pd loop start myproj "Get the test suite green and the docs current" --every 30 --max 10 --budget 3
 ```
 
-Defaults come from the policy: 60 minutes between iterations, 24 iterations, 5 USD. Spend is the session's cost since the loop started, including its subagents. `pd loop set <id>` changes the interval (5 minutes or more), the iteration cap, or the budget of an existing loop; a new interval applies after the iteration already scheduled.
+Defaults come from the policy: 30 minutes between iterations, up to 17,520 iterations (a year at that cadence), at most 100 USD per loop, and a shared 1 USD rolling daily cap across all loops.
 
-Lifecycle: `active` while scheduled; `paused` when you pause it, when the budget is reached, or when the agent reports `blocked`; `done` when the goal is achieved, the iteration cap is reached, or you stop it; `failed` if the session disappears. `pd loop resume <id>` reactivates a paused loop with a fresh budget window (subagent spend included); resuming a loop that is already active is refused. A crash in the middle of an iteration resumes that same iteration, waiting on the same submission, instead of starting another. Loops run in the background, so they do not mark the session as busy.
+The half-hour factory uses a shared $1 rolling daily scheduler allowance. `loops.dailyBudgetSince` optionally starts a fresh allowance at an epoch-millisecond timestamp when changing cost policy; it excludes older charges from the scheduler gate only, preserves recorded spending, and does not reset itself. A single running iteration can overshoot the allowance. The 12-turn instruction is a prompt target, not a hard stop.
 
-Each iteration sends the session a prompt that tells it to orient (memory, git status, open PRs, CI, the last iteration's notes); finish any open PR of its own first with the `pr_tick` loop; otherwise take the next step, which may be planning early on or implementation on a fresh `pd/...` branch with tests, opened as a PR; save what the next iteration needs with `memory_save`; and end by calling `loop_report` with `continue`, `done`, or `blocked` and a one-line note. `blocked` pauses the loop until you resume it and sends a notification.
+Product loops now run every 30 minutes. A busy session is checked again in five minutes without submitting another iteration. `loop_report` accepts a compact optional `nextTask` (up to 1,200 characters); fresh iterations receive it so they can implement one bounded slice without replanning the whole project. The shared rolling daily allowance remains $1 and can delay model work once exhausted. Small slices and short handoffs aim to reduce context costs; more subagent calls are not assumed to save money.
+
+Injected project memory is limited to 6,000 characters; records longer than 1,200 characters appear as excerpts with a prompt to retrieve full details using `memory_search`. Stored memory is unchanged. `pd cost` flags long iterations (40+ assistant turns), large individual shell results (over 20,000 characters), and repeated review-bearing calls for the same PR. These are diagnostics, not hard token or spend limits.
+
+Tool execution itself uses ordinary code. Routine agent decisions, independent reviews, search and fast/planning subagents use Haiku by default. Web search is bounded to one request, at most two server searches and 4,096 output tokens; paused or token-limited answers are explicitly marked incomplete. Fetch known URLs with `web_fetch` to avoid an additional search-model call.
+
+Lifecycle: `active` while scheduled; `paused` when you pause it, when the budget is reached, or when the agent reports `blocked`; `done` when the goal is achieved, the iteration cap is reached, or you stop it; `failed` if the session disappears. `pd loop resume <id>` reactivates a paused loop with a fresh budget window (subagent spend included); resuming a loop that is already active is refused, unless it is dormant (see below), in which case resume wakes it. A crash in the middle of an iteration resumes that same iteration, waiting on the same submission, instead of starting another. Loops run in the background, so they do not mark the session as busy.
+
+Each iteration orients to memory, Git status, open PRs, CI and prior notes, then chooses one small product improvement. Agents make routine, reversible product decisions themselves and record their reasoning; they ask Tony only for material risks or facts only he can provide. They finish any open PR first with pr_tick; otherwise they implement on a fresh branch, verify the change, open at most one PR, save handoff context, and finish with loop_report (continue, idle, done, or blocked).
+
+### Dormant loops
+
+A loop that has run out of work goes to sleep instead of paying for empty iterations. It happens two ways. The agent reports `idle` (nothing worthwhile left right now), or the daemon sees 3 completed iterations in a row that changed nothing on GitHub. "Nothing" means the same base-branch head, the same open agent PR heads, and the same open issues before and after the iteration. A dormant loop stays `active` (shown as `dormant` in `pd status`), and every 6 hours the gate looks at GitHub without any model call. It wakes when the work fingerprint changes: a new commit on the base branch, a new or updated agent PR, or a new or edited issue. `pd loop resume <id>` wakes it by hand. The audit log records `loop_dormant` and `loop_wake`.
+
+### Product judgment and pi add-ons
+
+Agents choose routine, reversible product improvements from each repository's goals and evidence, then record their reasoning. Human input remains a gate for one-way or materially risky decisions, safety-policy changes, and facts only the owner can provide. This deliberately adapts [KCD's autopilot guidance](https://github.com/kentcdodds/kcd-skills), which keeps product decisions with the human, to the autonomy you requested.
+
+Use repository instruction files for always-needed conventions and focused skills for workflows that are only sometimes needed. This factory calls pi-durable directly; pi-coding-agent add-ons are not automatically compatible. Treat pi packages and extensions as executable code: inspect and pin third-party sources, and install only when a concrete need justifies the extra cost and maintenance. See the official pi documentation for [skills](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md), [extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md), and [packages](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md).
 
 ### The skip gate
 
@@ -166,19 +184,23 @@ Before waking a model, the loop checks GitHub through the daemon's own `gh` (a h
 - Any loop waits, without a model call, when the agent has open PRs and every one is still running checks (recheck in 5 minutes).
 - A `goal` loop (the default) otherwise always wakes.
 - A `cleanup` loop wakes on its first run, and afterwards only when the base branch has a new commit since the last run and that commit is within the idle window (`skipIfIdleHours`, default 24).
-- A `friction-sweep` loop wakes only when the repo has open issues labelled `friction`.
+- A `friction-sweep` loop wakes only when the repo has open issues labelled `friction` that an agent may act on; issues labelled `needs-decision` or `friction-skipped` do not count.
+- A dormant loop wakes only when the repo's work fingerprint has changed since it went to sleep, checked every 6 hours.
 - If the gate cannot read the repo, the loop wakes anyway.
 
 ### Presets
 
-`pd loop start <session> --preset <name>` starts one of four cleanup automations. Each has a brief that tells the agent what to do and to open at most one PR per iteration, or none if there is nothing to do:
+`pd loop start <session> --preset <name>` starts the product-gardener loop or one of four cleanup automations. Each has a brief that tells the agent what to do and to open at most one PR per iteration, or none if there is nothing to do:
 
 | Preset | Kind | Every | What it does |
 | --- | --- | --- | --- |
+| `product-gardener` | goal | every 30 minutes | chooses one small, evidence-based user or developer value improvement for any repository |
 | `keep-tests-tight` | cleanup | daily | removes or rewrites redundant, flaky and implementation-coupled tests while keeping behavior covered |
 | `docs-freshness` | cleanup | daily | fixes `AGENTS.md`, README and decision records that recent commits made stale |
 | `legacy-reaper` | cleanup | weekly | removes provably dead code, expired flags and finished Cleanup issues |
 | `friction-sweep` | friction-sweep | daily | fixes open `friction` issues, highest priority first |
+
+Start a new repository with the generic product loop using `pd factory owner/repo --preset product-gardener`; add `--merge` only when you want gated PRs eligible for automatic merge.
 
 Presets are subject to the same merge gates as any other work. The weekly reaper uses a 7-day idle window; the daily ones use 24 hours.
 
@@ -216,13 +238,13 @@ The allowlist is empty by default, which means nothing auto-merges anywhere: PRs
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `model` | `anthropic/claude-sonnet-5-5` | Default model for new sessions (`provider/modelId`) |
-| `reviewModel` | `anthropic/claude-opus-5-5` | Model for the independent review |
-| `searchModel` | `anthropic/claude-opus-5-5` | Model that runs `web_search` |
+| `model` | `anthropic/claude-haiku-5-5` | Default model for new sessions (`provider/modelId`) |
+| `reviewModel` | `anthropic/claude-haiku-5-5` | Model for the independent review |
+| `searchModel` | `anthropic/claude-haiku-5-5` | Model that runs `web_search` |
 | `subagentModel` | `anthropic/claude-haiku-5-5` | Subagent tier `fast` |
-| `planModel` | `anthropic/claude-sonnet-5-5` | Subagent tier `plan` |
-| `deepModel` | `anthropic/claude-opus-5-5` | Subagent tier `deep` (needs a `why`) |
-| `thinkingLevel` | `medium` | `off`, `minimal`, `low`, `medium`, or `high` |
+| `planModel` | `anthropic/claude-haiku-5-5` | Subagent tier `plan` |
+| `deepModel` | `anthropic/claude-sonnet-5-5` | Subagent tier `deep` (needs a `why`) |
+| `thinkingLevel` | `low` | `off`, `minimal`, `low`, `medium`, or `high` |
 | `writableRoots` | `~/proj`, `/tmp` | Where `write`/`edit` are allowed and what the sandbox mounts writable (restart to apply to the sandbox) |
 | `automerge.repos` | `[]` | `owner/repo` allowlist for merging |
 | `automerge.baseBranches` | `{}` | `owner/repo` to branch PRs target, when the GitHub default is not the deploy branch |
@@ -232,9 +254,10 @@ The allowlist is empty by default, which means nothing auto-merges anywhere: PRs
 | `automerge.protectedPaths` | see below | Globs no automated PR may touch |
 | `automerge.requireChecks` | `true` | Need at least one passing GitHub Actions check |
 | `automerge.mergeMethod` | `squash` | `squash`, `merge`, or `rebase` |
-| `loops.defaultBudgetUsd` | `5` | Per-loop spend cap |
-| `loops.defaultIntervalMinutes` | `60` | Time between iterations |
-| `loops.defaultMaxIterations` | `24` | Iteration cap |
+| `loops.defaultBudgetUsd` | `100` | Per-loop spend cap |
+| `loops.dailyBudgetUsd` | `1` | Shared spend cap across all loops in any 24 hours |
+| `loops.defaultIntervalMinutes` | `30` | Time between iterations (half an hour) |
+| `loops.defaultMaxIterations` | `17520` | Iteration cap (one year at the default cadence) |
 
 Default `protectedPaths`: CI config (`.github`, GitLab, CircleCI), env and key files, `secrets` and `migrations` directories, Dockerfiles, Terraform, dependency manifests and lockfiles for Node (`package.json`, npm, pnpm, yarn and bun lockfiles), Rust (`Cargo.toml`, `Cargo.lock`), Go (`go.mod`, `go.sum`), Python (`requirements*.txt`, `pyproject.toml`, `poetry.lock`, `uv.lock`), Ruby (`Gemfile`, `Gemfile.lock`), PHP (`composer.json`) and JVM (`build.gradle*`, `pom.xml`), Makefiles, test-runner configs, git hooks, `wrangler.*`, `CODEOWNERS`, `.pi`, and `AGENTS.md`. The exact list is `DEFAULT_POLICY` in `src/config.ts`. In globs, `**` spans directories and `*` stays within one. Setting `protectedPaths` replaces the list, it does not extend it.
 
