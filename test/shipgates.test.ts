@@ -89,7 +89,7 @@ function fakeModels(replies: string[]) {
 	const calls: { system: string; user: string }[] = [];
 	return {
 		calls,
-		getModels: () => ["claude-opus-5-5", "claude-haiku-5-5"].map((id) => ({ provider: "anthropic", id })),
+		getModels: () => ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"].map((id) => ({ provider: "anthropic", id })),
 		completeSimple: async (_model: unknown, request: { systemPrompt: string; messages: { content: string }[] }) => {
 			calls.push({ system: request.systemPrompt, user: request.messages[0]!.content });
 			const reply = replies[Math.min(calls.length - 1, replies.length - 1)]!;

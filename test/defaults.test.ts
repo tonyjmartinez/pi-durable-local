@@ -15,16 +15,16 @@ const { DEFAULT_POLICY, loadPolicy } = await import("../src/config.ts");
 const ext = await import("../src/extensions.ts");
 
 describe("default models", () => {
-	it("uses the cheap tier routinely and reserves deep decisions", () => {
-		assert.equal(DEFAULT_POLICY.model, "anthropic/claude-haiku-5-5", "sessions");
-		assert.equal(DEFAULT_POLICY.reviewModel, "anthropic/claude-haiku-5-5", "the last gate before a merge");
+	it("runs every reasoning role on Sonnet (pi is the workforce; Opus generals live outside it)", () => {
+		assert.equal(DEFAULT_POLICY.model, "anthropic/claude-sonnet-5-5", "sessions");
+		assert.equal(DEFAULT_POLICY.reviewModel, "anthropic/claude-sonnet-5-5", "the last gate before a merge");
 		assert.equal(DEFAULT_POLICY.deepModel, "anthropic/claude-sonnet-5-5", "audited big decisions");
 	});
 
-	it("runs research and bulk work on the cheap model", () => {
+	it("keeps Haiku for tool work: search and fast subagents", () => {
 		assert.equal(DEFAULT_POLICY.searchModel, "anthropic/claude-haiku-5-5", "web_search: about a cent a call, not eleven");
 		assert.equal(DEFAULT_POLICY.subagentModel, "anthropic/claude-haiku-5-5");
-		assert.equal(DEFAULT_POLICY.planModel, "anthropic/claude-haiku-5-5");
+		assert.equal(DEFAULT_POLICY.planModel, "anthropic/claude-sonnet-5-5");
 	});
 });
 

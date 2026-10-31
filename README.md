@@ -5,7 +5,7 @@ A small, portable software factory: durable coding-agent sessions that keep runn
 One daemon, `pdd`, owns a pi-durable SQLite store at `~/.local/share/pi-durable/state.sqlite`. A small client, `pd`, talks to it over a Unix socket (`~/.local/share/pi-durable/pdd.sock`, mode 0600). Everything lives in the daemon:
 
 - **Named sessions.** Each is a long-running agent conversation with its own working directory and purpose. They survive restarts and crashes; the daemon resumes from the last committed step.
-- **A model ladder.** Routine sessions, planning, search, and reviews use Haiku. The `deep` subagent tier uses Sonnet; pi never runs Opus. Iterations start with fresh context, keep command output bounded, and are prompted to stop after 12 substantive turns.
+- **A chain of command.** The generals are Opus Claude Code sessions outside pi: you and the agents you drive over Remote Control set goals, approve parked PRs and answer escalations. Pi is the cheap workforce: every reasoning role (sessions, planning, design decisions, the merge review) runs on Sonnet, and Haiku only does tool work (web search and `fast` subagents). Pi never runs Opus. Iterations start with fresh context, keep command output bounded, and are prompted to stop after 12 substantive turns.
 - **A ship loop.** Agents open PRs from a template, and a deterministic state machine (`pr_tick`) says what to do next, runs an independent review, and merges low and medium risk changes that pass every gate. Anything riskier waits for you.
 - **Loops.** A session can be woken on an interval to push a goal forward, within a dollar budget and an iteration cap. A gate decides in code, before any model runs, whether a tick is worth it.
 - **Shared memory.** One durable document that every session reads in its system prompt and writes through `memory_save`, `memory_search`, and `memory_forget`.
@@ -97,11 +97,11 @@ It is a proxy to the daemon's socket, not a second owner of the store: only an a
 
 | Role | Policy key | Default |
 | --- | --- | --- |
-| Session (the agent you attach to) | `model` | `anthropic/claude-haiku-5-5` |
+| Session (the agent you attach to) | `model` | `anthropic/claude-sonnet-5-5` |
 | Subagent tier `fast` (default) | `subagentModel` | `anthropic/claude-haiku-5-5` |
-| Subagent tier `plan` | `planModel` | `anthropic/claude-haiku-5-5` |
+| Subagent tier `plan` | `planModel` | `anthropic/claude-sonnet-5-5` |
 | Subagent tier `deep` | `deepModel` | `anthropic/claude-sonnet-5-5` |
-| Independent PR reviewer | `reviewModel` | `anthropic/claude-haiku-5-5` |
+| Independent PR reviewer | `reviewModel` | `anthropic/claude-sonnet-5-5` |
 | `web_search` | `searchModel` | `anthropic/claude-haiku-5-5` |
 
 A session delegates with the `subagent` tool: one focused, self-contained task to a cheaper model that works in the same directory under the same sandbox. `fast` is for research, scoped implementation, tests and diagnosing checks; `plan` is for product decisions and deciding what to build next; `deep` is for a big swing or a design decision and requires a `why`, which is written to the audit log with the model used. Subagents cannot push, open or merge PRs, or message other sessions; their parent does that. Their spend counts toward the parent's loop budget.
@@ -137,7 +137,7 @@ The reasons that always park a PR for a human are: it comes from a fork; its aut
 
 **CI.** Only GitHub Actions check runs on the exact head commit count as a pass. Commit statuses and check runs from other apps can block a PR but never pass it, because anyone with a token can post one. Each check name carries its source (`name [app-slug]` for another app's check run, `context [commit status]` for a status). If the only failing checks are from outside GitHub Actions, such as a Cloudflare build that fails on every branch, the agent is not asked to fix them: the PR parks for you with those check names listed. It stays blocked and is never ignored. A failing Actions check next to an external one is still the agent's to fix. All pages of check runs are read, not just the first 100. For 90 seconds after the daemon pushes a commit, the tick adds a synthetic pending check, because right after a push only the fastest workflow may have registered and its green must not be mistaken for all of CI.
 
-**The independent review.** A separate model call (`reviewModel`, Haiku by default) reads the title, description and diff and replies with a JSON verdict. It is told to treat all three as untrusted data written by the agent under review. The PR text is placed inside a random per-call delimiter the PR cannot forge. The diff is fetched for the exact head commit being keyed (a compare against the base), and if the head, title or description changes while the review runs, the tick fails and reviews again, so a verdict can never be stored for a commit it did not read. A diff over 200,000 characters is rejected as too large to review, never truncated. Conflicting verdicts are a rejection. A reply with no verdict at all is a failed review: the tick errors, nothing is cached, and the next tick retries. The verdict is cached per exact head commit plus a hash of the title and description, so it runs once per state of the PR and runs again after any push or `pr_edit`.
+**The independent review.** A separate model call (`reviewModel`, Sonnet by default) reads the title, description and diff and replies with a JSON verdict. It is told to treat all three as untrusted data written by the agent under review. The PR text is placed inside a random per-call delimiter the PR cannot forge. The diff is fetched for the exact head commit being keyed (a compare against the base), and if the head, title or description changes while the review runs, the tick fails and reviews again, so a verdict can never be stored for a commit it did not read. A diff over 200,000 characters is rejected as too large to review, never truncated. Conflicting verdicts are a rejection. A reply with no verdict at all is a failed review: the tick errors, nothing is cached, and the next tick retries. The verdict is cached per exact head commit plus a hash of the title and description, so it runs once per state of the PR and runs again after any push or `pr_edit`.
 
 **The merge.** A squash merge (or the configured method) pinned to the head commit that was checked (`--match-head-commit`), with the branch deleted. If the branch moved after the check, the merge fails and the next tick starts over.
 
@@ -161,7 +161,7 @@ Product loops now run every 30 minutes. A busy session is checked again in five 
 
 Injected project memory is limited to 6,000 characters; records longer than 1,200 characters appear as excerpts with a prompt to retrieve full details using `memory_search`. Stored memory is unchanged. `pd cost` flags long iterations (40+ assistant turns), large individual shell results (over 20,000 characters), and repeated review-bearing calls for the same PR. These are diagnostics, not hard token or spend limits.
 
-Tool execution itself uses ordinary code. Routine agent decisions, independent reviews, search and fast/planning subagents use Haiku by default. Web search is bounded to one request, at most two server searches and 4,096 output tokens; paused or token-limited answers are explicitly marked incomplete. Fetch known URLs with `web_fetch` to avoid an additional search-model call.
+Tool execution itself uses ordinary code. Agent decisions, planning, design decisions and independent reviews use Sonnet by default; search and `fast` subagents use Haiku. Web search is bounded to one request, at most two server searches and 4,096 output tokens; paused or token-limited answers are explicitly marked incomplete. Fetch known URLs with `web_fetch` to avoid an additional search-model call.
 
 Lifecycle: `active` while scheduled; `paused` when you pause it, when the budget is reached, or when the agent reports `blocked`; `done` when the goal is achieved, the iteration cap is reached, or you stop it; `failed` if the session disappears. `pd loop resume <id>` reactivates a paused loop with a fresh budget window (subagent spend included); resuming a loop that is already active is refused, unless it is dormant (see below), in which case resume wakes it. A crash in the middle of an iteration resumes that same iteration, waiting on the same submission, instead of starting another. Loops run in the background, so they do not mark the session as busy.
 
@@ -238,11 +238,11 @@ The allowlist is empty by default, which means nothing auto-merges anywhere: PRs
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `model` | `anthropic/claude-haiku-5-5` | Default model for new sessions (`provider/modelId`) |
-| `reviewModel` | `anthropic/claude-haiku-5-5` | Model for the independent review |
+| `model` | `anthropic/claude-sonnet-5-5` | Default model for new sessions (`provider/modelId`) |
+| `reviewModel` | `anthropic/claude-sonnet-5-5` | Model for the independent review |
 | `searchModel` | `anthropic/claude-haiku-5-5` | Model that runs `web_search` |
 | `subagentModel` | `anthropic/claude-haiku-5-5` | Subagent tier `fast` |
-| `planModel` | `anthropic/claude-haiku-5-5` | Subagent tier `plan` |
+| `planModel` | `anthropic/claude-sonnet-5-5` | Subagent tier `plan` |
 | `deepModel` | `anthropic/claude-sonnet-5-5` | Subagent tier `deep` (needs a `why`) |
 | `thinkingLevel` | `low` | `off`, `minimal`, `low`, `medium`, or `high` |
 | `writableRoots` | `~/proj`, `/tmp` | Where `write`/`edit` are allowed and what the sandbox mounts writable (restart to apply to the sandbox) |

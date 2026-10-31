@@ -58,11 +58,11 @@ export type Policy = {
 };
 
 export const DEFAULT_POLICY: Policy = {
-	model: "anthropic/claude-haiku-5-5",
-	reviewModel: "anthropic/claude-haiku-5-5",
+	model: "anthropic/claude-sonnet-5-5",
+	reviewModel: "anthropic/claude-sonnet-5-5",
 	searchModel: "anthropic/claude-haiku-5-5",
 	subagentModel: "anthropic/claude-haiku-5-5",
-	planModel: "anthropic/claude-haiku-5-5",
+	planModel: "anthropic/claude-sonnet-5-5",
 	deepModel: "anthropic/claude-sonnet-5-5",
 	thinkingLevel: "low",
 	writableRoots: [join(home, "proj"), "/tmp"],
