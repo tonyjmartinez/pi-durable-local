@@ -68,6 +68,8 @@ type Scenario = {
 	now?: Record<string, unknown>;
 	graphql?: Rule["responses"];
 	merge?: Rule["responses"];
+	/** Answers of the compare API's behind_by, one per call; the last repeats. Default: up to date. */
+	behindBy?: Rule["responses"];
 };
 
 function script(s: Scenario = {}): void {
@@ -82,6 +84,7 @@ function script(s: Scenario = {}): void {
 		{ match: "check-runs\\?per_page=100", responses: [`${(s.runs ?? [ok()]).join("\n")}\n`] },
 		{ match: "/status\\?per_page=100$", responses: [JSON.stringify({ statuses: s.statuses ?? [] })] },
 		{ match: "^api repos/o/r/compare/main\\.\\.\\.[0-9a-f]+ -H", responses: [s.diff ?? DIFF] },
+		{ match: "^api repos/o/r/compare/main\\.\\.\\.[0-9a-f]+ --jq \\.behind_by$", responses: s.behindBy ?? ["0\n"] },
 		{ match: "^pr merge 7 ", responses: s.merge ?? [""] },
 		{ match: "^pr comment", responses: [""] },
 	]);
@@ -365,7 +368,7 @@ describe("PRs the factory does not own", () => {
 		assert.equal(outcome.decision.action, "park-human");
 		assert.match(outcome.decision.reason, /not one of the factory's own/);
 		assert.equal(models.calls.length, 0, "no review spend on a PR we do not own");
-		assert.equal(gh.callsMatching(/compare\//).length, 0);
+		assert.equal(gh.callsMatching(/compare\/.* -H Accept/).length, 0);
 		assert.equal(mergeCalls().length, 0);
 	};
 	it("never reviews or merges a fork PR", () => never({ isCrossRepository: true }));
@@ -438,6 +441,31 @@ describe("mechanical states", () => {
 			assert.equal((await tick(models)).decision.action, action);
 			assert.equal(models.calls.length, 0);
 		}
+	});
+
+	it("sends a PR behind its base back to rebase even when GitHub does not require it (merge queue)", async () => {
+		script({ behindBy: ["2\n"] });
+		const models = fakeModels([APPROVE]);
+		const outcome = await tick(models);
+		assert.equal(outcome.decision.action, "update-branch");
+		assert.equal(models.calls.length, 0, "no review spend on a head that must be rebased first");
+		assert.equal(mergeCalls().length, 0);
+	});
+
+	it("does not merge when another PR landed on the base after the review (merge queue)", async () => {
+		// Up to date when gathered and after the review; behind by the time it reaches the merge lane.
+		script({ behindBy: ["0\n", "0\n", "1\n"] });
+		const outcome = await tick(fakeModels([APPROVE]));
+		assert.equal(outcome.decision.action, "update-branch");
+		assert.match(outcome.decision.reason, /merge queue/);
+		assert.equal(outcome.merged, undefined);
+		assert.equal(mergeCalls().length, 0);
+		assert.ok(auditEvents().includes("merge_queued"));
+	});
+
+	it("falls back to GitHub's merge state when the compare API fails", async () => {
+		script({ behindBy: [{ code: 1, stderr: "HTTP 502" }] });
+		assert.equal((await tick(fakeModels([APPROVE]))).merged, true);
 	});
 
 	it("does not record a merge as done when GitHub refuses it", async () => {
