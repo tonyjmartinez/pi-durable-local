@@ -718,6 +718,30 @@ async function unresolvedThreadsOf(repo: string, number: number, context: Contex
 		.map((t) => ({ ...(t.path ? { path: t.path } : {}), ...(t.line ? { line: t.line } : {}), body: t.comments.nodes[0]?.body ?? "" }));
 }
 
+/**
+ * How many commits the base has that this head lacks, from GitHub's compare API; undefined when GitHub can't say.
+ * CI on a stale head never ran against what merging will produce, so a PR behind its base is not merged.
+ */
+async function commitsBehind(repo: string, base: string, sha: string, context: Context): Promise<number | undefined> {
+	try {
+		const out = Number((await gh(["api", `repos/${repo}/compare/${base}...${sha}`, "--jq", ".behind_by"], context)).trim());
+		return Number.isFinite(out) ? out : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** One merge at a time per repo: the up-to-date check and the merge must not interleave with another PR's merge. */
+const mergeLanes = new Map<string, Promise<unknown>>();
+function inMergeLane<T>(repo: string, work: () => Promise<T>): Promise<T> {
+	const run = (mergeLanes.get(repo) ?? Promise.resolve()).then(work, work);
+	mergeLanes.set(repo, run.catch(() => undefined));
+	return run;
+}
+
+const MERGE_QUEUE_REASON =
+	"The base moved since this head was tested, so its CI says nothing about the merge result (merge queue). Run git_sync, git rebase origin/<base>, verify, git_push with force, then tick again.";
+
 export type ShipFacts = { pr: PrView; state: PrTickState; tier: { tier: Tier; reasons: string[] }; parsed: ParsedPr; reviewKey: string };
 
 /** Everything decidePr needs, gathered by the daemon from GitHub. Nothing here is taken from the agent's word alone. */
@@ -779,7 +803,7 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 		state: pr.state as PrTickState["state"],
 		isDraft: pr.isDraft,
 		conflicts: pr.mergeable === "CONFLICTING",
-		behind: pr.mergeStateStatus === "BEHIND",
+		behind: pr.mergeStateStatus === "BEHIND" || ((await commitsBehind(repo, base, pr.headRefOid, context)) ?? 0) > 0,
 		checks,
 		reviewDecision: pr.reviewDecision || null,
 		unresolvedThreads,
@@ -874,15 +898,22 @@ export async function tickPr(
 		await runReview();
 	}
 	if (decision.action === "merge" && options.allowMerge) {
-		const subject = `${facts.pr.title} (#${number})`;
-		audit("merging", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid });
-		await gh(
-			["pr", "merge", String(number), "--repo", repo, `--${policy.automerge.mergeMethod}`, "--subject", subject,
-				"--delete-branch", "--match-head-commit", facts.pr.headRefOid],
-			context,
-		);
-		audit("merged", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid, tier: facts.state.tier });
-		return { decision, facts, merged: true, reviewed, usage };
+		return inMergeLane(repo, async (): Promise<TickOutcome> => {
+			// Another PR in this repo may have merged since the facts were gathered: re-check inside the lane.
+			if (((await commitsBehind(repo, facts.pr.baseRefName, facts.pr.headRefOid, context)) ?? 0) > 0) {
+				audit("merge_queued", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid, reason: "behind base" });
+				return { decision: { action: "update-branch", reason: MERGE_QUEUE_REASON }, facts, reviewed, usage };
+			}
+			const subject = `${facts.pr.title} (#${number})`;
+			audit("merging", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid });
+			await gh(
+				["pr", "merge", String(number), "--repo", repo, `--${policy.automerge.mergeMethod}`, "--subject", subject,
+					"--delete-branch", "--match-head-commit", facts.pr.headRefOid],
+				context,
+			);
+			audit("merged", { session: options.session, repo, pr: number, sha: facts.pr.headRefOid, tier: facts.state.tier });
+			return { decision, facts, merged: true, reviewed, usage };
+		});
 	}
 	if ((decision.action === "park-human" || decision.action === "no-merge-authority") && options.allowMerge) {
 		const first = await harnessLike.commit(async (tx) => {

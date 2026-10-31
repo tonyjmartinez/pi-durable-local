@@ -81,7 +81,7 @@ describe("pr_tick with wait: true", () => {
 		assert.equal(scheduled, 2, "two polls");
 		assert.equal(Date.now() - before, 2 * POLL_MS, "the mock clock moved exactly two polls");
 		assert.equal(mergeCalls(), 1);
-		assert.equal(gh.callsMatching(/compare\//).length, 1, "reviewed once");
+		assert.equal(gh.callsMatching(/compare\/.* -H Accept/).length, 1, "reviewed once");
 	});
 
 	it("reports the review's cost once, however many polls came before it", async () => {
