@@ -4,6 +4,7 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { request } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { buildBrief, openParks } from "./brief.ts";
 import { analyzeTranscript, formatCostReport } from "./costreport.ts";
 import { DB_PATH, ENV_FILE, loadSecrets, POLICY_FILE, SOCKET_PATH } from "./config.ts";
 
@@ -259,6 +260,22 @@ async function status(): Promise<void> {
 	console.log(c.dim(`\nTotal spend: ${money(total)}`));
 }
 
+/** What only a general can do, then the workforce. Plain text, so an Opus session can read it in one tool call. */
+async function brief(): Promise<void> {
+	const [s, audit] = await Promise.all([call("GET", "/status"), call("GET", "/audit")]);
+	const gh = (args: string[]) => spawnSync("gh", args, { encoding: "utf8", timeout: 30_000 });
+	const openPrs = new Set<string>();
+	for (const park of openParks(audit, new Set(audit.filter((e: Json) => e.event === "parked").map((e: Json) => `${e.repo}#${e.pr}`)))) {
+		if (gh(["pr", "view", String(park.pr), "-R", park.repo, "--json", "state", "--jq", ".state"]).stdout.trim() === "OPEN") openPrs.add(park.key);
+	}
+	const owners = [...new Set(audit.map((e: Json) => e.repo?.split("/")[0]).filter(Boolean))] as string[];
+	const decisions = owners.flatMap((owner) => {
+		const out = gh(["search", "issues", "--owner", owner, "--label", "needs-decision", "--state", "open", "--json", "repository,number,title"]);
+		return out.status === 0 ? (JSON.parse(out.stdout || "[]") as Json[]).map((i) => ({ repo: i.repository.nameWithOwner, number: i.number, title: i.title })) : [];
+	});
+	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions }));
+}
+
 function printLoop(loop: Json): void {
 	const status = loop.status === "active" && loop.dormant ? "dormant" : loop.status;
 	const color = status === "dormant" ? c.dim : loop.status === "active" ? c.green : loop.status === "paused" ? c.yellow : loop.status === "failed" ? c.red : c.dim;
@@ -310,6 +327,7 @@ const HELP = `pd — pi-durable sessions that keep running
   pd factory <owner/repo> ["goal"] [--preset product-gardener] [--base main] [--merge] [--name n]
                                             clone, create a session, and (with a goal or preset) start a loop
   pd status                                 sessions, loops, spend
+  pd brief                                  for generals: what needs a decision, then the workforce
   pd new <name> --cwd <dir> [--purpose "…"] [--model provider/id]
   pd attach <name>                          live view + chat (Ctrl-C detaches; agent keeps going)
   pd send <name> "message" [--steer]        fire and forget
@@ -349,6 +367,8 @@ async function main(argv: string[]): Promise<void> {
 		case "status":
 		case "ls":
 			return status();
+		case "brief":
+			return brief();
 		case "new": {
 			const created = await call("POST", "/sessions", {
 				name: positional[0],

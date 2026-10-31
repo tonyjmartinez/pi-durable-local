@@ -49,6 +49,7 @@ Why not systemd: on WSL, WSLg mounts its own tmpfs over `/run/user/$UID`, which 
 pd factory <owner/repo> ["goal"] [--preset product-gardener] [--base main] [--merge] [--name n]
                                           clone, create a session, and (with a goal or preset) start a loop
 pd status                                 sessions, loops, spend, parked tasks
+pd brief                                  for generals: what needs a decision, then the workforce
 pd new <name> --cwd <dir> [--purpose "..."] [--model provider/id]
 pd attach <name>                          live view and chat
 pd send <name> "message" [--steer]        fire and forget
@@ -92,6 +93,12 @@ Detaching never stops the agent. Sessions also see the project's `AGENTS.md` or 
 `pd ui` starts `bin/pd-ui`, which listens on 127.0.0.1 only (port `PD_UI_PORT`, default 7777) and prints a login link with a random token. The token lives in `~/.local/share/pi-durable/ui-token` (mode 0600); `pd ui --rotate` deletes it so old links stop working. The page shows sessions with a busy indicator, cost and model, a live transcript with send, steer and abort, the loops (start, pause, resume, stop), shared memory, and the audit log. It is one self-contained page with no external scripts, laid out for a phone.
 
 It is a proxy to the daemon's socket, not a second owner of the store: only an allowlist of daemon routes is reachable, every request needs the token, writes also need the token as a header (a cookie alone is refused), and the `Host` and `Origin` headers are checked. The Host check blocks DNS rebinding, but the UI is still meant for the local machine: to reach it from a phone, use an SSH tunnel or a private network, not a public interface.
+
+## Chain of command
+
+The generals are Tony and the Opus Claude Code sessions he drives over Remote Control. They sit outside pi, set goals (`pd factory`, `pd loop start`), approve parked PRs, answer `needs-decision` issues, and do what workers cannot: open a real browser, check the live site, add CI, supply secrets. Pi's sessions are the workforce: Sonnet for every reasoning role, with Haiku for tool work.
+
+`pd brief` is the one read a general needs. It lists what only a general can act on (parked PRs with their review verdict and the exact `pd approve` command, paused or failed loops with `pd loop resume`, open `needs-decision` issues across the owner's repos), then the last day's merges and a line per active loop. It is plain text, so a general can read it in one tool call. Workers know the chain of command: they decide reversible things themselves, and when they report `blocked`, the note is a single concrete ask.
 
 ## The model ladder
 
