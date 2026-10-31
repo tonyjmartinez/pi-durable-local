@@ -1062,3 +1062,75 @@ describe("memory context cost", () => {
   assert.equal(memory.text.length, 8000);
  });
 });
+describe("abort of a replaced task", () => {
+	it("leaves the loop alone when a newer task now runs it", async () => {
+		setup({ loop: { taskId: 7 } });
+		await abort({ ...task({ phase: "wait" }), id: 3 }, runtime(), context);
+		assert.equal(loopDoc()!.status, "active");
+		assert.equal(directives[0]!.outcome!.status, "aborted");
+	});
+
+	it("still pauses the loop when the aborted task is its current one", async () => {
+		setup({ loop: { taskId: 7 } });
+		await abort({ ...task({ phase: "wait" }), id: 7 }, runtime(), context);
+		assert.equal(loopDoc()!.status, "paused");
+	});
+});
+
+describe("loop_report", () => {
+	const report = ext.Loops_.tools!.find((tool) => tool.name === "loop_report")!.execute as (args: unknown, api: unknown, context: unknown) => Promise<{ isError?: boolean; output: { text: string }[] }>;
+	let created: { input: unknown; options: unknown }[];
+	let aborted: number[];
+	const api = () => ({
+		conversationId: 1,
+		snapshot: store.snapshot.bind(store),
+		commit: (callback: (tx: unknown) => unknown) =>
+			store.commit((tx) =>
+				callback({
+					...tx,
+					createTask: async (_definition: unknown, input: unknown, options: unknown) => {
+						created.push({ input, options });
+						return 50 + created.length;
+					},
+				}),
+			),
+	});
+	beforeEach(() => {
+		created = [];
+		aborted = [];
+		ext.setHarness({ abortTask: async (id: number) => void aborted.push(id) } as never);
+	});
+
+	it("wakes a dormant loop that reports continue: a fresh task now, the sleeping one ended", async () => {
+		setup({ loop: { taskId: 7, dormant: { fingerprint: "f", since: 0 }, noopStreak: 2, idleReported: true, nextRunAt: Date.now() + 6 * 3_600_000 } });
+		const result = await report({ loopId: "L1", status: "continue", note: "roadmap merged", nextTask: "item 1" }, api(), context);
+		assert.equal(result.isError, undefined);
+		const loop = loopDoc()!;
+		assert.equal(loop.dormant, undefined);
+		assert.equal(loop.idleReported, undefined);
+		assert.equal(loop.noopStreak, 0);
+		near(loop.nextRunAt!, Date.now());
+		assert.equal(loop.taskId, 51);
+		assert.deepEqual(created, [{ input: { loopId: "L1" }, options: { ownership: { kind: "conversation" }, background: true } }]);
+		assert.deepEqual(aborted, [7]);
+		assert.ok(events().some((entry) => entry.event === "loop_wake" && entry.loop === "L1"));
+	});
+
+	it("does not touch the task of an awake loop, or of a dormant loop that reports idle", async () => {
+		setup({ loop: { taskId: 7 } });
+		await report({ loopId: "L1", status: "continue", note: "more" }, api(), context);
+		setup({ loop: { taskId: 7, dormant: { fingerprint: "f", since: 0 } } });
+		await report({ loopId: "L1", status: "idle", note: "nothing" }, api(), context);
+		assert.ok(loopDoc()!.dormant !== undefined);
+		assert.equal(loopDoc()!.taskId, 7);
+		assert.deepEqual(created, []);
+		assert.deepEqual(aborted, []);
+	});
+
+	it("refuses a loop of another session", async () => {
+		setup({ loop: { session: "other", dormant: { fingerprint: "f", since: 0 } } });
+		const result = await report({ loopId: "L1", status: "continue", note: "x" }, api(), context);
+		assert.equal(result.isError, true);
+		assert.deepEqual(created, []);
+	});
+});

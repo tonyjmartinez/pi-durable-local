@@ -1680,7 +1680,9 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 	abort: async (task, runtime, context) => {
 		await runtime.commit(async (tx) => {
 			const current = (await tx.doc(Loops)).byId[task.input.loopId];
-			if (current !== undefined && current.status === "active") Object.assign(current, { status: "paused", note: "stopped" });
+			// A task that was replaced (a dormant loop woken by its report) must not pause the loop its successor now runs.
+			const replaced = current?.taskId !== undefined && (task as { id?: unknown }).id !== undefined && current.taskId !== (task as { id?: unknown }).id;
+			if (current !== undefined && current.status === "active" && !replaced) Object.assign(current, { status: "paused", note: "stopped" });
 			return { status: "terminal", outcome: { status: "aborted" } };
 		}, context);
 	},
@@ -1702,6 +1704,8 @@ export const Loops_ = defineExtension({
 			}),
 			execute: async (args, api, context) => {
 				const { name: caller } = await sessionCwd(api, api.conversationId, context);
+				let replacedTask: number | undefined;
+				let woke = false;
 				const updated = await api.commit(async (tx) => {
 					const loop = (await tx.doc(Loops)).byId[args.loopId];
 					if (loop === undefined || loop.session !== caller) return undefined;
@@ -1709,9 +1713,24 @@ export const Loops_ = defineExtension({
 					loop.nextTask = args.nextTask?.trim() || undefined;
 					if (args.status === "idle") loop.idleReported = true;
 					else if (loop.status === "active" && args.status !== "continue") loop.status = args.status === "done" ? "done" : "paused";
+					// "continue" from a dormant loop (work done outside a tick, e.g. on a message) means there is work again.
+					// Its task is asleep for hours, so start a fresh one now; the old one is ended below and leaves the loop be.
+					if (args.status === "continue" && loop.status === "active" && loop.dormant !== undefined) {
+						delete loop.dormant;
+						delete loop.idleReported;
+						loop.noopStreak = 0;
+						loop.nextRunAt = Date.now();
+						woke = true;
+						replacedTask = loop.taskId;
+						loop.taskId = await tx.createTask(LoopTask, { loopId: loop.id }, { ownership: { kind: "conversation" }, background: true });
+					}
 					return { ...loop };
 				}, context);
 				if (updated === undefined) return fail(`No loop ${args.loopId} in your session`);
+				if (woke) audit("loop_wake", { loop: args.loopId, reason: "reported continue while dormant" });
+				if (replacedTask !== undefined) {
+					await harness().abortTask(replacedTask as never, context).catch((error: unknown) => audit("loop_task_end_failed", { loop: args.loopId, task: replacedTask, error: String(error) }));
+				}
 				audit("loop_report", { loop: args.loopId, status: args.status, note: args.note, nextTask: updated.nextTask });
 				return { ...text(`Loop ${args.loopId}: ${updated.status} — ${args.note}`), control: { terminate: true } };
 			},
