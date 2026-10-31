@@ -134,7 +134,7 @@ let current = null; // session name when a transcript is open
 let streamCtl = null;
 let pollTimer = null;
 
-const TABS = [["sessions", "Sessions"], ["loops", "Loops"], ["memory", "Memory"], ["audit", "Audit"], ["processes", "Processes"]];
+const TABS = [["sessions", "Sessions"], ["loops", "Loops"], ["memory", "Memory"], ["audit", "Audit"], ["processes", "Processes"], ["chat", "Chat"]];
 function drawTabs() {
   $("tabs").replaceChildren(...TABS.map(([id, label]) =>
     h("button", { role: "tab", "aria-selected": String(tab === id && !current), onclick: () => go(id) }, label)));
@@ -162,6 +162,7 @@ function render() {
   if (tab === "memory") return renderMemory();
   if (tab === "audit") return renderAudit();
   if (tab === "processes") return renderProcesses();
+  if (tab === "chat") return renderChat();
 }
 
 // ---- sessions ----
@@ -414,6 +415,27 @@ async function renderProcesses() {
         h("button", { class: "btn", onclick: renderProcesses }, "Refresh")),
       ...rows,
       h("div", { class: "card" }, h("strong", {}, "Daemon log"), log));
+    log.scrollTop = log.scrollHeight;
+  } catch (e) { main.replaceChildren(h("div", { class: "banner" }, e.message)); }
+}
+
+// ---- chat ----
+async function renderChat() {
+  try {
+    const rows = await api("GET", "/chat?limit=200");
+    const names = status.sessions.map((s) => s.name);
+    const log = h("div", { class: "logbox" }, ...rows.map((m) => h("div", { class: "card" },
+      h("div", { class: "row wrap" }, h("strong", {}, m.from + " → " + m.to), h("span", { class: "dim" }, new Date(m.at).toLocaleTimeString() + (m.to !== "all" && !m.delivered ? " · not a live pi session" : ""))),
+      h("div", {}, m.text))));
+    if (!rows.length) log.append(h("p", { class: "dim" }, "No messages yet. Agents post here with session_send or pd-chat."));
+    const to = h("select", {}, h("option", { value: "all" }, "everyone"), ...names.map((n) => h("option", { value: n }, n)));
+    const input = h("input", { type: "text", placeholder: "Message", maxlength: "4000" });
+    const send = async () => {
+      if (!input.value.trim()) return;
+      try { await api("POST", "/chat", { from: "you", to: to.value, text: input.value }); input.value = ""; renderChat(); } catch (e) { alert(e.message); }
+    };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+    main.replaceChildren(log, h("div", { class: "card row" }, to, input, h("button", { class: "btn primary", onclick: send }, "Send")));
     log.scrollTop = log.scrollHeight;
   } catch (e) { main.replaceChildren(h("div", { class: "banner" }, e.message)); }
 }

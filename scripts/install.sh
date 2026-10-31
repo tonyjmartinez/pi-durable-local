@@ -76,7 +76,7 @@ fi
 
 step "Linking commands into $BIN_DIR"
 mkdir -p "$BIN_DIR"
-for name in pd pdd-up; do
+for name in pd pdd-up pd-chat; do
 	source_file="$ROOT/bin/$name"
 	[[ -f "$source_file" ]] || die "$source_file is missing."
 	chmod +x "$source_file"

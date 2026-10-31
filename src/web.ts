@@ -7,6 +7,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DATA_DIR, SOCKET_PATH } from "./config.ts";
+import { ChatError, postChat, readChat } from "./chat.ts";
 import { control, listProcesses, tailLog } from "./processes.ts";
 import type { Action, ProcessOptions } from "./processes.ts";
 
@@ -40,6 +41,8 @@ export type UiOptions = {
 	html?: string;
 	/** Where the Processes tab looks for the daemon; the defaults are right outside tests. */
 	processes?: ProcessOptions;
+	/** Where the Chat tab keeps its messages; the default is right outside tests. */
+	chatFile?: string;
 };
 
 /** Read the UI token, creating it (mode 600) on first use. */
@@ -156,6 +159,23 @@ export function createUiServer(options: UiOptions): Server {
 		if (url.pathname === "/api/processes/log" && method === "GET") {
 			const report = await listProcesses(options.processes);
 			return json(response, 200, { log: tailLog(report.logFile, Number(url.searchParams.get("lines") ?? 200)) });
+		}
+		if (url.pathname === "/api/chat" && method === "GET") {
+			return json(response, 200, readChat(options.chatFile, { limit: Number(url.searchParams.get("limit") ?? 200), after: url.searchParams.get("after") ?? undefined }));
+		}
+		if (url.pathname === "/api/chat" && method === "POST") {
+			let input: Record<string, unknown>;
+			try {
+				input = JSON.parse((await readBody(request)).toString("utf8") || "{}") as Record<string, unknown>;
+			} catch {
+				return json(response, 400, { error: "body must be JSON" });
+			}
+			try {
+				return json(response, 200, await postChat({ from: input.from ?? "you", to: input.to, text: input.text }, { file: options.chatFile, socketPath: options.socketPath }));
+			} catch (error) {
+				if (error instanceof ChatError) return json(response, error.status, { error: error.message });
+				throw error;
+			}
 		}
 		const act = /^\/api\/processes\/(start|stop|restart)$/.exec(url.pathname);
 		if (act !== null && method === "POST") {
