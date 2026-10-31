@@ -5,9 +5,9 @@
 /**
  * goal: always wakes. cleanup: skips when the base branch is idle. friction-sweep: skips with no open friction.
  * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
- * flaky base branch.
+ * flaky base branch. design: wakes like goal, but is its own kind so a repo can run one product and one design loop.
  */
-export type LoopKind = "goal" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health";
+export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health";
 
 export type GateLoop = {
 	/** Default "goal". */
@@ -276,7 +276,15 @@ ${RULES}
 ${END}`,
 };
 
-export type LoopPreset = CleanupName | "product-gardener";
+export const DESIGN_POLISH_PROMPT = [
+	"Incrementally improve how this repository looks and feels to its users. Act as the product's designer: visual hierarchy, layout, spacing, typography, colour, consistency, responsive behaviour, interaction states, and accessibility (contrast, focus, motion, target size).",
+	"Orient first: read the project instructions, README, and any design or art direction docs (for example DESIGN_NOTES.md, docs/ART.md, a design-tokens or theme file), then recent commits and open PRs. Follow the established direction; do not invent a new one. If none exists and the visuals are inconsistent, your first PR may be a short design doc that names the existing palette, type scale and spacing as found in the code.",
+	"Choose one small, reversible design improvement: unify a one-off colour or spacing value onto the existing tokens, fix an inconsistent component state, improve a mobile layout, sharpen hierarchy on one screen, or make a game sprite or effect read more clearly. State the user problem and why it is the best next step in the PR.",
+	"There is no browser in the sandbox, so make changes you can verify from code: build output, existing tests, contrast ratios you compute from the actual colour values, and CSS or render code you can reason about. Say in the PR's Testing section exactly what you checked and what needs a human visual look. Prefer changes whose effect is clear from the diff.",
+	"Leave product copy, features and information architecture to the product loop. Do not add fonts, image assets from outside the repo, or dependencies. Name the branch pd/design-<slug> and declare Touches: <area> so it composes with the product loop's PRs; if a product PR is open on the same files, pick another area.",
+].join("\n");
+
+export type LoopPreset = CleanupName | "product-gardener" | "design-polish";
 
 export const PRODUCT_GARDENER_PROMPT = [
 	"Incrementally improve this repository for its users. Act as the product-minded maintainer, not just a ticket taker.",
@@ -290,9 +298,11 @@ export const PRODUCT_GARDENER_PROMPT = [
 export const LOOP_PROMPTS: Record<LoopPreset, string> = {
 	...CLEANUP_PROMPTS,
 	"product-gardener": PRODUCT_GARDENER_PROMPT,
+	"design-polish": DESIGN_POLISH_PROMPT,
 };
 
 export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
 	...CLEANUP_SCHEDULE,
 	"product-gardener": { kind: "goal", intervalMinutes: 30 },
+	"design-polish": { kind: "design", intervalMinutes: 60 },
 };

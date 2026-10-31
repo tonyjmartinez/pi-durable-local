@@ -1377,13 +1377,13 @@ type LoopCheckpoint =
 /** Facts from the daemon's own state that only some loop kinds need. */
 export type GateExtras = { allLoops: readonly Loop[]; sessions: Record<string, SessionInfo>; dailySpendShare?: number };
 
-/** Another awake goal loop on the same GitHub repo: the product loop a code-quality loop must not fight. */
+/** Another awake goal or design loop on the same GitHub repo: the product work a code-quality loop must not fight. */
 export function productLoopActive(loop: Pick<Loop, "id" | "session">, extras: Pick<GateExtras, "allLoops" | "sessions">): boolean {
 	const repoOf = (name: string) => githubRepoOf(extras.sessions[name]?.remote);
 	const mine = repoOf(loop.session);
 	if (mine === undefined) return false;
 	return extras.allLoops.some((other) =>
-		other.id !== loop.id && other.status === "active" && other.dormant === undefined && (other.kind ?? "goal") === "goal" && repoOf(other.session) === mine);
+		other.id !== loop.id && other.status === "active" && other.dormant === undefined && ["goal", "design"].includes(other.kind ?? "goal") && repoOf(other.session) === mine);
 }
 
 /** What the loop gate needs, from GitHub via the daemon's gh: no model call, a handful of API requests. */

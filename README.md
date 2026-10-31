@@ -58,7 +58,7 @@ pd ui [--rotate]                          local web UI on 127.0.0.1:7777 (PD_UI_
 pd tmux [names...]                        tmux session "pd": status window plus one window per session
 
 pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
-pd loop start <session> --preset product-gardener|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep|code-quality|ci-health
+pd loop start <session> --preset product-gardener|design-polish|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep|code-quality|ci-health
 pd loop ls | pause <id> | resume <id> | stop <id>
 pd loop set <id> [--every 30] [--max 17520] [--budget 100]
 
@@ -200,11 +200,12 @@ Before waking a model, the loop checks GitHub through the daemon's own `gh` (a h
 
 ### Presets
 
-`pd loop start <session> --preset <name>` starts the product-gardener loop, one of four cleanup automations, or one of two maintenance loops. Each has a brief that tells the agent what to do and to open at most one PR per iteration, or none if there is nothing to do:
+`pd loop start <session> --preset <name>` starts the product-gardener or design-polish loop, one of four cleanup automations, or one of two maintenance loops. Each has a brief that tells the agent what to do and to open at most one PR per iteration, or none if there is nothing to do:
 
 | Preset | Kind | Every | What it does |
 | --- | --- | --- | --- |
 | `product-gardener` | goal | every 30 minutes | chooses one small, evidence-based user or developer value improvement for any repository |
+| `design-polish` | design | hourly | one small visual or interaction improvement that follows the repo's design docs; leaves copy and features to the product loop, and can run beside it |
 | `keep-tests-tight` | cleanup | daily | removes or rewrites redundant, flaky and implementation-coupled tests while keeping behavior covered |
 | `docs-freshness` | cleanup | daily | fixes `AGENTS.md`, README and decision records that recent commits made stale |
 | `legacy-reaper` | cleanup | weekly | removes provably dead code, expired flags and finished Cleanup issues |

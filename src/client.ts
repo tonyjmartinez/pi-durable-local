@@ -336,7 +336,7 @@ const HELP = `pd — pi-durable sessions that keep running
   pd tmux [names…]                          tmux session "pd": status window + one per session
 
   pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
-  pd loop start <session> --preset product-gardener|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
+  pd loop start <session> --preset product-gardener|design-polish|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
                                    |code-quality|ci-health
                                             product maintainer, cleanup, or maintenance preset
                                             (code-quality waits for the product loop; ci-health wakes on a red base)

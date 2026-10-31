@@ -171,13 +171,19 @@ describe("resolveLoopSpec", () => {
 		assert.equal(resolveLoopSpec({ preset: "friction-sweep" }).intervalMinutes, 1440);
 	});
 
+	it("design-polish is its own kind, hourly, so it can run beside a product loop", () => {
+		const spec = resolveLoopSpec({ preset: "design-polish" });
+		assert.equal(spec.intervalMinutes, 60);
+		assert.match(spec.goal, /designer/);
+	});
+
 	it("an interval given with a preset is kept", () => {
 		assert.equal(resolveLoopSpec({ preset: "docs-freshness", intervalMinutes: 90 }).intervalMinutes, 90);
 	});
 
 	it("refuses an unknown preset and lists the real ones", () => {
 		for (const preset of ["nope", "", "KEEP-TESTS-TIGHT"]) assert.equal(status(() => resolveLoopSpec({ preset })), 400, preset);
-		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, code-quality, ci-health, product-gardener/);
+		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, code-quality, ci-health, product-gardener, design-polish/);
 	});
 
 	it("refuses names that only exist on every object", () => {
@@ -307,6 +313,12 @@ describe("assertNoTwin", () => {
 		const loops = [{ id: "L1", session: "s", kind: "ci-health" as const, status: "done" as const }, { id: "L2", session: "t", kind: "ci-health" as const, status: "active" as const }, { id: "L3", session: "s", kind: "code-quality" as const, status: "active" as const }];
 		assert.doesNotThrow(() => assertNoTwin(loops, "s", ci));
 		assert.doesNotThrow(() => assertNoTwin([{ id: "L4", session: "s", kind: "goal", status: "active" }], "s", resolveLoopSpec({ goal: "g" })));
+	});
+
+	it("lets one design loop run beside one product loop, but not two design loops", () => {
+		const design = resolveLoopSpec({ preset: "design-polish" });
+		assert.doesNotThrow(() => assertNoTwin([{ id: "L5", session: "s", kind: "goal", status: "active" }], "s", design));
+		assert.equal(status(() => assertNoTwin([{ id: "L6", session: "s", kind: "design", status: "active" }], "s", design)), 409);
 	});
 });
 
