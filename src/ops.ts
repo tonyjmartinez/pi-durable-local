@@ -133,7 +133,8 @@ export function newLoop(input: { id: string; session: string; spec: LoopSpec; de
 		goal: spec.goal,
 		intervalMinutes: spec.intervalMinutes ?? defaults.defaultIntervalMinutes,
 		maxIterations: spec.maxIterations ?? defaults.defaultMaxIterations,
-		budgetUsd: spec.budgetUsd ?? defaults.defaultBudgetUsd,
+		// A preset with its own budget (the maintenance loops) is capped below the product default.
+		budgetUsd: spec.budgetUsd ?? schedule?.budgetUsd ?? defaults.defaultBudgetUsd,
 		iteration: 0,
 		status: "active",
 		note: "",

@@ -60,6 +60,8 @@ const DIFF = "diff --git a/src/a.ts b/src/a.ts\n+++ b/src/a.ts\n+export const x 
 type Scenario = {
 	pr?: Record<string, unknown>;
 	files?: string[];
+	/** Patches by filename, as GitHub's files API returns them. */
+	patches?: Record<string, string>;
 	runs?: string[];
 	statuses?: unknown[];
 	diff?: string;
@@ -74,7 +76,7 @@ function script(s: Scenario = {}): void {
 		{ match: "^pr view 7 --repo o/r --json headRefOid,title,body$", responses: [JSON.stringify({ headRefOid: view.headRefOid, title: view.title, body: view.body, ...s.now })] },
 		{ match: "^pr view 7 --repo o/r --json number,", responses: [JSON.stringify(view)] },
 		{ match: "^repo view o/r --json defaultBranchRef", responses: ["main\n"] },
-		{ match: "^api --paginate repos/o/r/pulls/7/files", responses: [`${JSON.stringify((s.files ?? ["src/a.ts"]).map((filename) => ({ filename, previous_filename: null })))}\n`] },
+		{ match: "^api --paginate repos/o/r/pulls/7/files", responses: [`${JSON.stringify((s.files ?? ["src/a.ts"]).map((filename) => ({ filename, previous_filename: null, patch: s.patches?.[filename] ?? null })))}\n`] },
 		{ match: "^api user --jq \\.login$", responses: ["factorybot\n"] },
 		{ match: "^api graphql", responses: s.graphql ?? [threads([])] },
 		{ match: "check-runs\\?per_page=100", responses: [`${(s.runs ?? [ok()]).join("\n")}\n`] },
@@ -115,6 +117,29 @@ beforeEach(() => {
 	store = makeStore();
 	writeFileSync(AUDIT, "");
 	script();
+});
+
+describe("a PR that weakens tests", () => {
+	const skipped = { files: ["src/a.ts", "test/a.test.ts"], patches: { "test/a.test.ts": "@@ -1 +1 @@\n-it('parses', () => {})\n+it.skip('parses', () => {})" } };
+
+	it("parks for a human from any session, and is never merged", async () => {
+		script(skipped);
+		const outcome = await tick(fakeModels([APPROVE]));
+		assert.equal(outcome.decision.action, "park-human");
+		assert.match((outcome.decision.details ?? []).join("\n"), /weakens tests: test\/a\.test\.ts: skipped, focused or todo test/);
+		assert.equal(mergeCalls().length, 0);
+	});
+
+	it("parks deleted tests only on a maintenance branch", async () => {
+		const removed = { files: ["test/a.test.ts"], patches: { "test/a.test.ts": "@@ -1,3 +0,0 @@\n-it('parses', () => {\n-  expect(parse('a')).toBe(1);\n-});" } };
+		script({ ...removed, pr: { headRefName: "pd/quality-tidy" } });
+		const strict = await tick(fakeModels([APPROVE]));
+		assert.equal(strict.decision.action, "park-human");
+		assert.match((strict.decision.details ?? []).join("\n"), /removes 1 test/);
+		store = makeStore();
+		script({ ...removed, pr: { headRefName: "pd/prune-tests" } });
+		assert.doesNotMatch((await tick(fakeModels([APPROVE]))).decision.details?.join("\n") ?? "", /weakens tests/);
+	});
 });
 
 describe("a clean PR", () => {

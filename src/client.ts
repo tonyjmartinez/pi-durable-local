@@ -337,7 +337,9 @@ const HELP = `pd — pi-durable sessions that keep running
 
   pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
   pd loop start <session> --preset product-gardener|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
-                                            product maintainer or cleanup preset
+                                   |code-quality|ci-health
+                                            product maintainer, cleanup, or maintenance preset
+                                            (code-quality waits for the product loop; ci-health wakes on a red base)
   pd loop ls | pause <id> | resume <id> | stop <id>
   pd loop set <id> [--every 30] [--max 17520] [--budget 100]
 

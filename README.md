@@ -58,7 +58,7 @@ pd ui [--rotate]                          local web UI on 127.0.0.1:7777 (PD_UI_
 pd tmux [names...]                        tmux session "pd": status window plus one window per session
 
 pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
-pd loop start <session> --preset product-gardener|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
+pd loop start <session> --preset product-gardener|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep|code-quality|ci-health
 pd loop ls | pause <id> | resume <id> | stop <id>
 pd loop set <id> [--every 30] [--max 17520] [--budget 100]
 
@@ -192,12 +192,15 @@ Before waking a model, the loop checks GitHub through the daemon's own `gh` (a h
 - A `goal` loop (the default) otherwise always wakes.
 - A `cleanup` loop wakes on its first run, and afterwards only when the base branch has a new commit since the last run and that commit is within the idle window (`skipIfIdleHours`, default 24).
 - A `friction-sweep` loop wakes only when the repo has open issues labelled `friction` that an agent may act on; issues labelled `needs-decision` or `friction-skipped` do not count.
+- A `code-quality` loop follows the cleanup rules, and also waits while another awake goal loop (the product loop) works on the same repo, so the two never edit the same files.
+- A `ci-health` loop wakes only when the base branch's newest run of a workflow failed, or a workflow failed in more than 20% of its last 10 runs (flaky). It remembers the CI state it last worked on, so the same red commit is not retried every hour.
+- Both maintenance kinds yield to product loops once today's spend passes 70% of `dailyBudgetUsd`. A red base branch is the exception.
 - A dormant loop wakes only when the repo's work fingerprint has changed since it went to sleep, checked every 6 hours.
 - If the gate cannot read the repo, the loop wakes anyway.
 
 ### Presets
 
-`pd loop start <session> --preset <name>` starts the product-gardener loop or one of four cleanup automations. Each has a brief that tells the agent what to do and to open at most one PR per iteration, or none if there is nothing to do:
+`pd loop start <session> --preset <name>` starts the product-gardener loop, one of four cleanup automations, or one of two maintenance loops. Each has a brief that tells the agent what to do and to open at most one PR per iteration, or none if there is nothing to do:
 
 | Preset | Kind | Every | What it does |
 | --- | --- | --- | --- |
@@ -206,6 +209,12 @@ Before waking a model, the loop checks GitHub through the daemon's own `gh` (a h
 | `docs-freshness` | cleanup | daily | fixes `AGENTS.md`, README and decision records that recent commits made stale |
 | `legacy-reaper` | cleanup | weekly | removes provably dead code, expired flags and finished Cleanup issues |
 | `friction-sweep` | friction-sweep | daily | fixes open `friction` issues, highest priority first |
+| `code-quality` | code-quality | daily | one behavior-preserving simplification: duplication, overgrown functions, lint and type errors; $5 budget |
+| `ci-health` | ci-health | hourly check | fixes a red base branch or a flaky test at its cause; $5 budget |
+
+The `ci-health` loop cannot change CI configuration: `.github/` and test-runner configs are protected, and pushes touching `.github/` are refused. GitHub runs a workflow from a pushed branch, with the repo's secrets, before anyone reviews it. When a fix really is a CI change, the agent writes a proposal to `docs/proposed-ci/` for a human.
+
+Every PR, from any session, is parked for a human if its diff weakens tests: a new `.skip`, `.only`, `xit`, `test.todo`, test-runner retries, `--passWithNoTests`, or a lowered coverage threshold. Maintenance PRs (branches `pd/quality-*` and `pd/ci-*`) also may not delete tests or assertions, or add `@ts-ignore`, `eslint-disable` and the like.
 
 Start a new repository with the generic product loop using `pd factory owner/repo --preset product-gardener`; add `--merge` only when you want gated PRs eligible for automatic merge.
 

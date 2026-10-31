@@ -2,7 +2,12 @@
 // The cleanup schedule and the "skip if no commits in 24h" rule follow Kent C. Dodds's autopilot cleanup automations
 // (https://github.com/kentcdodds/kcd-skills, MIT). All times are epoch milliseconds.
 
-export type LoopKind = "goal" | "cleanup" | "friction-sweep";
+/**
+ * goal: always wakes. cleanup: skips when the base branch is idle. friction-sweep: skips with no open friction.
+ * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
+ * flaky base branch.
+ */
+export type LoopKind = "goal" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health";
 
 export type GateLoop = {
 	/** Default "goal". */
@@ -13,6 +18,18 @@ export type GateLoop = {
 	skipIfIdleHours?: number;
 	/** Set when the loop went to sleep: the repo's work fingerprint at that moment. */
 	dormant?: { fingerprint: string; since: number };
+	/** ci-health: the CI finding the last completed iteration was woken for, so the same red commit is not retried. */
+	lastCiKey?: string;
+};
+
+/** The base branch's recent workflow runs, as the ci-health gate sees them. */
+export type GateCi = {
+	/** The commit the newest run on the base branch tested. */
+	headSha: string;
+	/** Workflows whose newest completed run on the base branch failed. */
+	failing: readonly string[];
+	/** Workflows that failed in more than FLAKY_FAILURE_SHARE of their recent runs but are not failing now. */
+	flaky: readonly string[];
 };
 
 export type GatePr = {
@@ -33,6 +50,12 @@ export type GateRepo = {
 	openFrictionIssues: number;
 	/** Open issues as "count:latest update", so a new or edited issue changes it. */
 	openIssuesKey?: string;
+	/** code-quality: another loop on this repo (the product loop) is awake and may be editing the same files. */
+	productLoopActive?: boolean;
+	/** All loops' spend today as a share of the factory's daily cap (0..1+); undefined when there is no cap. */
+	dailySpendShare?: number;
+	/** ci-health: undefined when the runs could not be read. */
+	ci?: GateCi;
 };
 
 export type WakeDecision = { wake: boolean; reason: string; nextCheckMinutes?: number };
@@ -46,6 +69,12 @@ export const IDLE_RECHECK_MINUTES = 60;
 export const DORMANT_RECHECK_MINUTES = 6 * 60;
 /** Consecutive iterations that changed nothing on GitHub before a loop goes dormant on its own. */
 export const AUTO_DORMANT_AFTER = 3;
+/** Maintenance loops (code-quality, ci-health) yield to product loops once today's spend passes this share of the cap. */
+export const MAINTENANCE_SHARE_OF_DAILY = 0.7;
+/** A workflow that failed in more than this share of its recent base-branch runs is flaky. */
+export const FLAKY_FAILURE_SHARE = 0.2;
+/** How many recent base-branch runs the ci-health gate reads. */
+export const CI_RUNS_WINDOW = 10;
 
 const HOUR = 3_600_000;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -62,6 +91,35 @@ export function afterIteration(input: { before?: string; after?: string; streak:
 	const unchanged = input.before !== undefined && input.after !== undefined && input.before === input.after;
 	const streak = unchanged ? input.streak + 1 : 0;
 	return { streak, dormant: input.idleReported || streak >= AUTO_DORMANT_AFTER };
+}
+
+/** What the ci-health loop would be woken for; equal keys mean the same finding. Empty means nothing to do. */
+export function ciKey(ci: GateCi): string {
+	if (ci.failing.length === 0 && ci.flaky.length === 0) return "";
+	return `${ci.headSha}|red:${[...ci.failing].sort().join(",")}|flaky:${[...ci.flaky].sort().join(",")}`;
+}
+
+/**
+ * The base branch's CI, from `gh run list --branch <base> --json headSha,workflowName,conclusion,status,createdAt`
+ * (any order). Only completed runs count; runs that were cancelled or skipped say nothing about health.
+ */
+export function summarizeRuns(runs: readonly { headSha: string; workflowName: string; conclusion: string | null; status: string; createdAt: string }[]): GateCi | undefined {
+	const newestFirst = [...runs].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+	if (newestFirst.length === 0) return undefined;
+	const judged = newestFirst.filter((run) => run.status === "completed" && (run.conclusion === "success" || run.conclusion === "failure" || run.conclusion === "timed_out"));
+	const byWorkflow = new Map<string, boolean[]>();
+	for (const run of judged) {
+		const list = byWorkflow.get(run.workflowName) ?? [];
+		list.push(run.conclusion !== "success");
+		byWorkflow.set(run.workflowName, list);
+	}
+	const failing: string[] = [];
+	const flaky: string[] = [];
+	for (const [name, failed] of byWorkflow) {
+		if (failed[0]) failing.push(name);
+		else if (failed.length >= 3 && failed.filter(Boolean).length / failed.length > FLAKY_FAILURE_SHARE) flaky.push(name);
+	}
+	return { headSha: newestFirst[0]!.headSha, failing: failing.sort(), flaky: flaky.sort() };
 }
 
 export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number }): WakeDecision {
@@ -82,13 +140,37 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 			: { wake: true, reason: "dormant loop woke: new commits, PR activity or issues" };
 	}
 
+	// Maintenance waits while product loops need the day's budget. A red base branch is the exception: it blocks
+	// every product PR anyway.
+	const maintenance = kind === "code-quality" || kind === "ci-health";
+	const baseRed = kind === "ci-health" && repo.ci !== undefined && repo.ci.failing.length > 0;
+	if (maintenance && !baseRed && repo.dailySpendShare !== undefined && repo.dailySpendShare >= MAINTENANCE_SHARE_OF_DAILY) {
+		return { wake: false, reason: `today's spend is ${Math.round(repo.dailySpendShare * 100)}% of the daily cap; product loops go first`, nextCheckMinutes: IDLE_RECHECK_MINUTES };
+	}
+
+	if (kind === "ci-health") {
+		if (repo.ci === undefined) return { wake: false, reason: "no workflow runs on the base branch to read", nextCheckMinutes: IDLE_RECHECK_MINUTES };
+		const key = ciKey(repo.ci);
+		if (key === "") return { wake: false, reason: "base branch CI is green and steady", nextCheckMinutes: IDLE_RECHECK_MINUTES };
+		if (key === loop.lastCiKey) return { wake: false, reason: `already worked on this CI state at ${repo.ci.headSha.slice(0, 7)}; waiting for a new commit`, nextCheckMinutes: IDLE_RECHECK_MINUTES };
+		const parts = [
+			repo.ci.failing.length > 0 ? `failing on ${repo.ci.headSha.slice(0, 7)}: ${repo.ci.failing.join(", ")}` : undefined,
+			repo.ci.flaky.length > 0 ? `flaky: ${repo.ci.flaky.join(", ")}` : undefined,
+		].filter(Boolean);
+		return { wake: true, reason: `base branch CI ${parts.join("; ")}` };
+	}
+
+	if (kind === "code-quality" && repo.productLoopActive === true) {
+		return { wake: false, reason: "the product loop on this repo is awake; quality work waits so they don't edit the same files", nextCheckMinutes: IDLE_RECHECK_MINUTES };
+	}
+
 	if (kind === "friction-sweep") {
 		return repo.openFrictionIssues > 0
 			? { wake: true, reason: `${plural(repo.openFrictionIssues, "open friction issue")}` }
 			: { wake: false, reason: "no open friction issues", nextCheckMinutes: IDLE_RECHECK_MINUTES };
 	}
 
-	if (kind === "cleanup") {
+	if (kind === "cleanup" || kind === "code-quality") {
 		const idleHours = loop.skipIfIdleHours ?? DEFAULT_SKIP_IF_IDLE_HOURS;
 		const firstRun = loop.iteration === 0 && loop.lastRunAt === undefined;
 		if (firstRun) return { wake: true, reason: "first run" };
@@ -112,14 +194,21 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 }
 
 /** Suggested interval and idle window for each cleanup brief. */
-export const CLEANUP_SCHEDULE: Record<CleanupName, { kind: LoopKind; intervalMinutes: number; skipIfIdleHours?: number }> = {
+export type LoopScheduleEntry = { kind: LoopKind; intervalMinutes: number; skipIfIdleHours?: number; budgetUsd?: number };
+
+export const CLEANUP_SCHEDULE: Record<CleanupName, LoopScheduleEntry> = {
 	"keep-tests-tight": { kind: "cleanup", intervalMinutes: 24 * 60, skipIfIdleHours: 24 },
 	"docs-freshness": { kind: "cleanup", intervalMinutes: 24 * 60, skipIfIdleHours: 24 },
 	"legacy-reaper": { kind: "cleanup", intervalMinutes: 7 * 24 * 60, skipIfIdleHours: 7 * 24 },
 	"friction-sweep": { kind: "friction-sweep", intervalMinutes: 24 * 60 },
+	"code-quality": { kind: "code-quality", intervalMinutes: 24 * 60, skipIfIdleHours: 24, budgetUsd: 5 },
+	"ci-health": { kind: "ci-health", intervalMinutes: 60, budgetUsd: 5 },
 };
 
-export type CleanupName = "keep-tests-tight" | "docs-freshness" | "legacy-reaper" | "friction-sweep";
+export type CleanupName = "keep-tests-tight" | "docs-freshness" | "legacy-reaper" | "friction-sweep" | "code-quality" | "ci-health";
+
+/** Branch prefixes (after the factory's own pd/) that mark maintenance PRs, which get the stricter test rules. */
+export const MAINTENANCE_BRANCH_SLUGS = ["quality-", "ci-"] as const;
 
 const RULES = `Rules for every iteration:
 - Keep this iteration cheap: at most 12 substantive assistant turns. Make one focused pass and stop once the small change is verified or a genuine blocker is found.
@@ -165,6 +254,26 @@ List the open issues labelled friction with issue_list (label friction, search "
 - For a routine, reversible product decision, choose the option that best serves users and document why. Mark needs-decision only for a one-way change, a safety-policy change, or a fact only the owner can provide; include the options and a recommendation.
 ${RULES}
 ${END}`,
+
+	"code-quality": `Improve code quality without changing behavior.
+Find one spot where the code is harder to read or change than it needs to be, and make it simpler: duplicated logic, an overgrown function, a confusing name, a lint or type error, an any that hides a real type, an error that is swallowed. Prefer code touched by recent commits (git log on the base branch) and code that recent bugs or friction issues came from.
+- Behavior must not change. The existing tests must pass unchanged: do not edit a test's assertions in the same PR as the code it tests. If a behavior has no test, add one first, in the same PR, that passes before and after.
+- Never weaken a check to make it pass: no .skip, .only, xit, test.todo, retries, --passWithNoTests, @ts-ignore, @ts-expect-error, eslint-disable, or loosened types. The daemon parks PRs that add these markers or delete tests or assertions.
+- Name the branch pd/quality-<slug>. Declare Touches: <area> (composes) and Door: two-way. At most 200 changed lines; one theme per PR.
+- Leave tests alone otherwise (keep-tests-tight owns pruning them) and leave product changes to the product loop.
+${RULES}
+${END}`,
+
+	"ci-health": `Keep the base branch's CI green and steady.
+You were woken because the base branch's CI is failing or flaky (the reason is in the wake line above). Read the failing runs read-only: gh run list --branch <base> --limit 10, then gh run view <id> --log-failed (capture only the relevant error lines).
+- Failing: find the commit that broke it and fix the cause in code or tests with one small PR. If a test caught a real bug, fix the code, not the test.
+- Flaky: find why the test is nondeterministic (timing, ordering, shared state, network, randomness) and make it deterministic. File a friction issue naming the test and the evidence. Never quarantine, skip, or retry a test to get green.
+- You cannot change CI configuration: .github/, test-runner configs, lockfiles and dependency manifests are protected and pushes touching .github/ are refused. If the fix really is a CI change (caching, a missing secret, a job that is skipped but reports success, a slow step), write the proposed workflow or a short note to docs/proposed-ci/<name>.md in a PR for Tony, with the evidence, and report it in loop_report.
+- If the failure is outside the repo (an outage, an expired token, a missing secret), do no code work: file friction with needs-decision and report "blocked".
+- Never weaken tests: no .skip, .only, xit, test.todo, retries, --passWithNoTests, lowered coverage thresholds, deleted assertions. The daemon parks any PR that does.
+- Name the branch pd/ci-<slug>. Door: two-way. At most 200 changed lines.
+${RULES}
+${END}`,
 };
 
 export type LoopPreset = CleanupName | "product-gardener";
@@ -183,7 +292,7 @@ export const LOOP_PROMPTS: Record<LoopPreset, string> = {
 	"product-gardener": PRODUCT_GARDENER_PROMPT,
 };
 
-export const LOOP_SCHEDULE: Record<LoopPreset, { kind: LoopKind; intervalMinutes: number; skipIfIdleHours?: number }> = {
+export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
 	...CLEANUP_SCHEDULE,
 	"product-gardener": { kind: "goal", intervalMinutes: 30 },
 };

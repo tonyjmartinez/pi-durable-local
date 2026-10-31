@@ -70,8 +70,10 @@ export type Loop = {
 	spent?: number;
 	/** Time-stamped charges (last two days), for the factory-wide daily budget. */
 	spendLog?: { at: number; usd: number }[];
-	/** goal (default), cleanup (skips when the base branch is idle), or friction-sweep (skips with no open friction). */
-	kind?: "goal" | "cleanup" | "friction-sweep";
+	/** How the loop gate decides to wake it; see LoopKind in loopgate.ts. Default goal. */
+	kind?: "goal" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health";
+	/** ci-health: the CI finding the last completed iteration was woken for. */
+	lastCiKey?: string;
 	skipIfIdleHours?: number;
 	/** Base branch head when the loop last woke a model. */
 	lastSeenBaseSha?: string;

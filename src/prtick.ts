@@ -109,8 +109,14 @@ export function decidePr(state: PrTickState, overrides: Partial<PrTickOptions> =
 	if (state.state === "CLOSED") return { action: "stop", reason: "Pull request is closed without merging." };
 
 	if (state.isDraft) return { action: "mark-ready", reason: "Mark the draft pull request ready for review." };
-	if (state.conflicts) return { action: "resolve-conflicts", reason: "Resolve merge conflicts before continuing." };
-	if (state.behind) return { action: "update-branch", reason: "Update the branch from its base before continuing." };
+	// GitHub reports a conflict when the base squash-merged an earlier commit of this same change; a rebase drops it.
+	if (state.conflicts) {
+		return {
+			action: "resolve-conflicts",
+			reason: "GitHub reports merge conflicts. Run git_sync, then git rebase origin/<base>: if the base already squash-merged an earlier commit of this change, the rebase skips it cleanly and that is expected. Fix any real conflicts, verify, then git_push with force.",
+		};
+	}
+	if (state.behind) return { action: "update-branch", reason: "Update the branch from its base: git_sync, git rebase origin/<base>, verify, then git_push with force." };
 
 	const failing = state.checks.filter((check) => check.bucket === "fail" || check.bucket === "cancel");
 	if (failing.length > 0) return { action: "fix-ci", reason: "Fix the failing checks.", details: failing.map((check) => check.name) };

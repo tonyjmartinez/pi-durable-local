@@ -177,7 +177,7 @@ describe("resolveLoopSpec", () => {
 
 	it("refuses an unknown preset and lists the real ones", () => {
 		for (const preset of ["nope", "", "KEEP-TESTS-TIGHT"]) assert.equal(status(() => resolveLoopSpec({ preset })), 400, preset);
-		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, product-gardener/);
+		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, code-quality, ci-health, product-gardener/);
 	});
 
 	it("refuses names that only exist on every object", () => {

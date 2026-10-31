@@ -25,10 +25,11 @@ import {
 	UsageDoc,
 } from "@earendil-works/pi-durable";
 import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
-import { AUTO_DORMANT_AFTER, afterIteration, DORMANT_RECHECK_MINUTES, type GatePr, type GateRepo, shouldWake, workFingerprint } from "./loopgate.ts";
+import { AUTO_DORMANT_AFTER, afterIteration, CI_RUNS_WINDOW, MAINTENANCE_BRANCH_SLUGS, ciKey, DORMANT_RECHECK_MINUTES, type GatePr, type GateRepo, shouldWake, summarizeRuns, workFingerprint } from "./loopgate.ts";
 import { dailyBudget, nextRoomAt, recordSpend } from "./spend.ts";
 import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, type FrictionInput, frictionFromAudit } from "./friction.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
+import { testWeakening } from "./testguard.ts";
 import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
 import { effectiveRisk, maxTier, type ParsedPr, parsePrBody, PR_TEMPLATE, type RiskFile, riskFloor, type Tier } from "./prtemplate.ts";
 import { Approvals, audit, Branches, type Loop, Loops, type Memory, Memories, Parked, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
@@ -686,10 +687,10 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 	const pr = JSON.parse(await gh(["pr", "view", String(number), "--repo", repo, "--json", `${PR_FIELDS},mergeStateStatus`], context)) as PrView & { mergeStateStatus: string };
 	const base = await baseBranchOf(repo, policy, context);
 	const files = JSON.parse(
-		await gh(["api", "--paginate", `repos/${repo}/pulls/${number}/files`, "--jq", "[.[] | {filename, previous_filename}]"], context).then(
+		await gh(["api", "--paginate", `repos/${repo}/pulls/${number}/files`, "--jq", "[.[] | {filename, previous_filename, patch}]"], context).then(
 			(out) => `[${out.trim().split("\n").filter(Boolean).map((page) => page.slice(1, -1)).filter(Boolean).join(",")}]`,
 		),
-	) as RiskFile[];
+	) as (RiskFile & { patch?: string | null })[];
 	const parsed = parsePrBody(pr.body ?? "");
 	const floor = riskFloor({ files, additions: pr.additions, deletions: pr.deletions, protectedPaths: rules.protectedPaths, newDependencies: false });
 	const tier = { tier: effectiveRisk(floor, parsed.risk), reasons: floor.reasons };
@@ -701,6 +702,10 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 	if (pr.additions + pr.deletions > rules.maxChangedLines) needsHuman.push(`${pr.additions + pr.deletions} lines > ${rules.maxChangedLines}`);
 	const touched = protectedMatches(files.flatMap((f) => [f.filename, ...(f.previous_filename ? [f.previous_filename] : [])]), rules.protectedPaths);
 	if (touched.length > 0) needsHuman.push(`protected paths: ${touched.join(", ")}`);
+	// Getting to green by weakening tests needs a human, from any session. Maintenance branches get the strict rules.
+	const maintenance = MAINTENANCE_BRANCH_SLUGS.some((slug) => pr.headRefName.startsWith(`${rules.branchPrefix}${slug}`));
+	const weakened = testWeakening(files.map((f) => ({ filename: f.filename, ...(typeof f.patch === "string" ? { patch: f.patch } : {}) })), { strict: maintenance });
+	if (weakened.length > 0) needsHuman.push(`weakens tests: ${weakened.join("; ")}`);
 	// package.json: scripts-only changes are reviewed like code (and at least medium); anything else waits for Tony.
 	let scriptsChanged = false;
 	for (const file of files.filter((f) => f.filename === "package.json" || f.filename.endsWith("/package.json"))) {
@@ -1318,9 +1323,10 @@ export async function sessionCost(reader: { snapshot: Harness["snapshot"] }, ses
 	return total;
 }
 
-export function loopPrompt(loop: Loop, policy: Policy): string {
+export function loopPrompt(loop: Loop, policy: Policy, wakeReason?: string): string {
 	return `[loop ${loop.id}, iteration ${loop.iteration + 1}/${loop.maxIterations}]
-Ongoing goal: ${loop.goal}
+${wakeReason ? `Woken because: ${wakeReason}
+` : ""}Ongoing goal: ${loop.goal}
 
 Next work item: ${loop.nextTask || "Choose one small slice of the ongoing goal, then save the following slice with loop_report.nextTask."}
 
@@ -1366,10 +1372,22 @@ export function loopHandoff(loop: Loop, openPrs: readonly number[]): string {
 type LoopCheckpoint =
 	| { phase: "wait" }
 	| { phase: "run"; iteration: number }
-	| { phase: "await"; iteration: number; baseSha?: string; costBefore?: number; fingerprint?: string };
+	| { phase: "await"; iteration: number; baseSha?: string; costBefore?: number; fingerprint?: string; ciKey?: string };
+
+/** Facts from the daemon's own state that only some loop kinds need. */
+export type GateExtras = { allLoops: readonly Loop[]; sessions: Record<string, SessionInfo>; dailySpendShare?: number };
+
+/** Another awake goal loop on the same GitHub repo: the product loop a code-quality loop must not fight. */
+export function productLoopActive(loop: Pick<Loop, "id" | "session">, extras: Pick<GateExtras, "allLoops" | "sessions">): boolean {
+	const repoOf = (name: string) => githubRepoOf(extras.sessions[name]?.remote);
+	const mine = repoOf(loop.session);
+	if (mine === undefined) return false;
+	return extras.allLoops.some((other) =>
+		other.id !== loop.id && other.status === "active" && other.dormant === undefined && (other.kind ?? "goal") === "goal" && repoOf(other.session) === mine);
+}
 
 /** What the loop gate needs, from GitHub via the daemon's gh: no model call, a handful of API requests. */
-async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, context: Context): Promise<GateRepo | undefined> {
+async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, context: Context, extras?: GateExtras): Promise<GateRepo | undefined> {
 	const repo = githubRepoOf(session.remote);
 	if (repo === undefined) return undefined;
 	const base = await baseBranchOf(repo, policy, context);
@@ -1390,7 +1408,23 @@ async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, conte
 		: 0;
 	const issues = JSON.parse(await gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json", "updatedAt"], context)) as { updatedAt: string }[];
 	const openIssuesKey = `${issues.length}:${issues.map((issue) => issue.updatedAt).sort().at(-1) ?? ""}`;
-	return { baseHeadSha: head.sha, baseHeadCommittedAt: Date.parse(head.at), ...(loop.lastSeenBaseSha ? { lastSeenBaseSha: loop.lastSeenBaseSha } : {}), openAgentPrs, openFrictionIssues, openIssuesKey };
+	// The base branch's recent runs, for ci-health only. Unreadable runs leave ci undefined and the gate skips.
+	const ci = loop.kind === "ci-health"
+		? await gh(["run", "list", "--repo", repo, "--branch", base, "--limit", String(CI_RUNS_WINDOW), "--json", "headSha,workflowName,conclusion,status,createdAt"], context)
+			.then((out) => summarizeRuns(JSON.parse(out)))
+			.catch(() => undefined)
+		: undefined;
+	return {
+		baseHeadSha: head.sha,
+		baseHeadCommittedAt: Date.parse(head.at),
+		...(loop.lastSeenBaseSha ? { lastSeenBaseSha: loop.lastSeenBaseSha } : {}),
+		openAgentPrs,
+		openFrictionIssues,
+		openIssuesKey,
+		...(loop.kind === "code-quality" && extras !== undefined ? { productLoopActive: productLoopActive(loop, extras) } : {}),
+		...(extras?.dailySpendShare !== undefined ? { dailySpendShare: extras.dailySpendShare } : {}),
+		...(ci !== undefined ? { ci } : {}),
+	};
 }
 
 export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterations: number }>({
@@ -1465,10 +1499,11 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				return;
 			}
 			// The cheap gate: decide from GitHub facts whether a model call is worth it at all.
-			const facts = await gateFacts(loop, session, policy, context).catch(() => undefined);
+			const dailySpendShare = policy.loops.dailyBudgetUsd > 0 ? daily.spent / policy.loops.dailyBudgetUsd : undefined;
+			const facts = await gateFacts(loop, session, policy, context, { allLoops, sessions: sessions?.byName ?? {}, ...(dailySpendShare !== undefined ? { dailySpendShare } : {}) }).catch(() => undefined);
 			// A dormant loop with no readable repo stays asleep: only a resume wakes it.
 			const gate = facts !== undefined
-				? shouldWake({ loop: { kind: loop.kind, lastRunAt: loop.lastRunAt, iteration: loop.iteration, skipIfIdleHours: loop.skipIfIdleHours, dormant: loop.dormant }, repo: facts, now: Date.now() })
+				? shouldWake({ loop: { kind: loop.kind, lastRunAt: loop.lastRunAt, iteration: loop.iteration, skipIfIdleHours: loop.skipIfIdleHours, dormant: loop.dormant, lastCiKey: loop.lastCiKey }, repo: facts, now: Date.now() })
 				: loop.dormant !== undefined ? { wake: false, reason: "dormant (repo state unavailable)", nextCheckMinutes: DORMANT_RECHECK_MINUTES } : undefined;
 			if (gate !== undefined) {
 				if (!gate.wake) {
@@ -1512,16 +1547,16 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 			await conversation.submit(
 				{
 					type: "input",
-					content: loopPrompt(loop, policy),
+					content: loopPrompt(loop, policy, gate?.wake ? gate.reason : undefined),
 					entry: { kind: "pdl.loop-tick", data: { loopId: loop.id, iteration } },
 					requestId: `loop:${loop.id}:${iteration}`,
 				},
 				context,
 			);
-			await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration, costBefore, ...(facts ? { baseSha: facts.baseHeadSha, fingerprint: workFingerprint(facts) } : {}) } }), context);
+			await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration, costBefore, ...(facts ? { baseSha: facts.baseHeadSha, fingerprint: workFingerprint(facts) } : {}), ...(facts?.ci ? { ciKey: ciKey(facts.ci) } : {}) } }), context);
 		},
 		await: async (task, runtime, context) => {
-			const { iteration, baseSha, costBefore, fingerprint } = task.state.checkpoint;
+			const { iteration, baseSha, costBefore, fingerprint, ciKey: wokenCiKey } = task.state.checkpoint;
 			const loop = (await runtime.snapshot(Loops, context))?.byId[task.input.loopId];
 			const session = loop === undefined ? undefined : (await runtime.snapshot(Sessions, context))?.byName[loop.session];
 			const record = session === undefined
@@ -1548,6 +1583,8 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				current.nextRunAt = Date.now() + current.intervalMinutes * 60_000;
 				// Only a completed iteration counts as having seen this base; a failed one retries even if nothing changed.
 				if (settled?.status === "done" && baseSha !== undefined) current.lastSeenBaseSha = baseSha;
+				// The same for ci-health: a completed iteration has dealt with this CI state; only a new one wakes it.
+				if (settled?.status === "done" && wokenCiKey !== undefined) current.lastCiKey = wokenCiKey;
 				if (settled?.status === "done") {
 					const next = afterIteration({ before: fingerprint, after, streak: current.noopStreak ?? 0, idleReported: current.idleReported === true });
 					current.noopStreak = next.streak;

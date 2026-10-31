@@ -144,9 +144,9 @@ describe("reasons", () => {
 });
 
 describe("CLEANUP_PROMPTS", () => {
-	const names = ["keep-tests-tight", "docs-freshness", "legacy-reaper", "friction-sweep"] as const;
+	const names = ["keep-tests-tight", "docs-freshness", "legacy-reaper", "friction-sweep", "code-quality", "ci-health"] as const;
 
-	it("has the four briefs", () => {
+	it("has the six briefs", () => {
 		assert.deepEqual(Object.keys(CLEANUP_PROMPTS).sort(), [...names].sort());
 		assert.deepEqual(Object.keys(CLEANUP_SCHEDULE).sort(), [...names].sort());
 	});
