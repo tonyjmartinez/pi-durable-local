@@ -65,8 +65,14 @@ else
 fi
 
 step "Installing dependencies"
-(cd "$ROOT" && npm ci --no-audit --no-fund)
-ok "npm ci"
+PIDFILE="${PD_DATA_DIR:-$HOME/.local/share/pi-durable}/pdd.pid"
+if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null && [[ -d "$ROOT/node_modules" ]]; then
+	# npm ci deletes node_modules, which would pull modules out from under the running daemon.
+	warn "the daemon is running; skipping npm ci. Run 'pdd-up stop', re-run this script, then 'pdd-up' to refresh dependencies."
+else
+	(cd "$ROOT" && npm ci --no-audit --no-fund)
+	ok "npm ci"
+fi
 
 step "Linking commands into $BIN_DIR"
 mkdir -p "$BIN_DIR"

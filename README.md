@@ -26,7 +26,7 @@ git clone <this repo> ~/proj/pi-durable-local && cd ~/proj/pi-durable-local
 scripts/install.sh              # add --autostart to also start the daemon at login
 ```
 
-`scripts/install.sh` is idempotent. It checks the requirements (warning when `gh` or a working `bwrap` is missing), runs `npm ci`, links `pd` and `pdd-up` into `~/.local/bin`, and creates `~/.config/pi-durable/env` (mode 0600, `ANTHROPIC_API_KEY=` blank) if it does not exist. It never prints secrets and only edits `~/.profile` when you pass `--autostart`. `PD_BIN_DIR` and `PD_CONFIG_DIR` override the install locations.
+`scripts/install.sh` is idempotent, and skips `npm ci` while the daemon is running so it cannot pull `node_modules` out from under it. It checks the requirements (warning when `gh` or a working `bwrap` is missing), runs `npm ci`, links `pd` and `pdd-up` into `~/.local/bin`, and creates `~/.config/pi-durable/env` (mode 0600, `ANTHROPIC_API_KEY=` blank) if it does not exist. It never prints secrets and only edits `~/.profile` when you pass `--autostart`. `PD_BIN_DIR` and `PD_CONFIG_DIR` override the install locations. CI (`.github/workflows/ci.yml`) runs the typecheck and tests on every PR.
 
 Then:
 
