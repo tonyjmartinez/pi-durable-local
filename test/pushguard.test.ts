@@ -165,6 +165,44 @@ describe("git_push", () => {
 		assert.equal(remoteRef("pd/redo"), rewritten);
 	});
 
+	it("refuses a branch cut from another work branch instead of the deploy branch", async () => {
+		const earlier = branch("pd/earlier", { "e.txt": "1\n" });
+		assert.equal((await run("git_push", { branch: "pd/earlier" })).isError, undefined);
+		sh(AGENT, "checkout", "-q", "-B", "pd/later", earlier);
+		writeFileSync(join(AGENT, "l.txt"), "1\n");
+		sh(AGENT, "add", "-A");
+		sh(AGENT, "commit", "-q", "-m", "later");
+		sh(AGENT, "checkout", "-q", "main");
+		const result = await run("git_push", { branch: "pd/later" });
+		assert.equal(result.isError, true);
+		assert.match(textOf(result), /come from another work branch \(pd\/earlier\)/);
+		assert.match(textOf(result), /git checkout -B pd\/later origin\/main/);
+		assert.equal(remoteRef("pd/later"), undefined);
+	});
+
+	it("refuses commits whose change is already on the deploy branch", async () => {
+		// An earlier PR squash-merged onto main, and a new branch still carries its original commit.
+		const seed = join(root, "seed");
+		sh(seed, "pull", "-q", "origin", "main");
+		writeFileSync(join(seed, "m.txt"), "merged\n");
+		sh(seed, "add", "-A");
+		sh(seed, "commit", "-q", "-m", "squash of an earlier PR");
+		sh(seed, "push", "-q", "origin", "HEAD:main");
+		sh(AGENT, "checkout", "-q", "-B", "pd/carry", "origin/main");
+		writeFileSync(join(AGENT, "m.txt"), "merged\n");
+		sh(AGENT, "add", "-A");
+		sh(AGENT, "commit", "-q", "-m", "the earlier PR's commit");
+		writeFileSync(join(AGENT, "n.txt"), "new\n");
+		sh(AGENT, "add", "-A");
+		sh(AGENT, "commit", "-q", "-m", "new work");
+		sh(AGENT, "checkout", "-q", "main");
+		const result = await run("git_push", { branch: "pd/carry" });
+		assert.equal(result.isError, true);
+		assert.match(textOf(result), /1 commit\(s\) \(\w{7}\) are already on main/);
+		assert.equal(remoteRef("pd/carry"), undefined);
+		assert.ok(readAudit(AUDIT).some((entry) => entry.event === "push_refused" && entry.reason === "stale base"));
+	});
+
 	it("refuses branch names outside the work prefix or with tricks", async () => {
 		for (const name of ["main", "feature/x", "pd/../main", "pd/a b", "pd/x;id", "pd/$(id)", "pd/-x y", "PD/x", "pd/"]) {
 			const result = await run("git_push", { branch: name });
