@@ -1,6 +1,6 @@
 // Regression tests for bypasses found in the security review of the guard.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { describe, it } from "node:test";
 import { DEFAULT_POLICY } from "../src/config.ts";
@@ -75,6 +75,9 @@ describe("guard bypass regressions", () => {
 
 describe("checkPath symlinks", () => {
 	it("blocks writes through a symlink under ~/proj that points at a secret directory", () => {
+		// A fresh machine (CI) may have neither ~/proj nor the config dir; make them, and remove only what we made.
+		const made = [`${home}/proj`, `${home}/.config`, `${home}/.config/pi-durable`].filter((path) => !existsSync(path));
+		for (const path of made) mkdirSync(path, { recursive: true });
 		const dir = mkdtempSync(`${home}/proj/.guard-test-`);
 		try {
 			symlinkSync(`${home}/.config/pi-durable`, `${dir}/link`);
@@ -83,6 +86,7 @@ describe("checkPath symlinks", () => {
 			assert.notEqual(checkPath("read", `${dir}/link/env`, dir, policy), undefined);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
+			for (const path of made.reverse()) rmSync(path, { recursive: true, force: true });
 		}
 	});
 });
