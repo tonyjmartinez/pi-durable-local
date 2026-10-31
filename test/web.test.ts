@@ -279,7 +279,9 @@ describe("page source", () => {
 			const known = /^\/(status|memory|audit)$/.test(path) && method === "GET"
 				|| /^\/(sessions|loops)$/.test(path)
 				|| (path === "/sessions/" || path === "/loops/") && method === "POST"
-				|| path === "/sessions/" && method === "GET";
+				|| path === "/sessions/" && method === "GET"
+				|| /^\/processes(\/log\?lines=\d+)?$/.test(path) && method === "GET"
+				|| path === "/processes/" && method === "POST";
 			assert.ok(known, `unexpected API call: ${method} ${path}`);
 		}
 	});
