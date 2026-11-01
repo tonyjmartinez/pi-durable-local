@@ -10,7 +10,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { makeFakeGh, makeStore } from "./fakegh.helper.ts";
-import { APPROVE, fakeModels, REJECT, run, shipScript, usageOf } from "./shipfixtures.helper.ts";
+import { APPROVE, DIFF, fakeModels, OTHER_SHA, pr, REJECT, run, shipScript, usageOf } from "./shipfixtures.helper.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pd-usage-"));
 process.env.PD_DATA_DIR = join(root, "data");
@@ -149,6 +149,36 @@ describe("tickPr and the pr tools report the review's cost", () => {
 			const again = await tick(models);
 			assert.equal(models.calls.length, 1);
 			assert.equal(again.usage, undefined);
+		});
+
+		it("reuses an approval when the head moved but the net diff did not (merge main, rebase)", async () => {
+			const models = fakeModels([APPROVE]);
+			await tick(models, false);
+			shipScript(gh, { pr: { headRefOid: OTHER_SHA } });
+			const again = await tick(models, false);
+			assert.equal(models.calls.length, 1, "no second review");
+			assert.equal(again.usage, undefined);
+			assert.equal(again.reviewed, false);
+			assert.notEqual(again.decision.action, "review");
+		});
+
+		it("re-reviews when the diff, or the description, really changed", async () => {
+			const models = fakeModels([APPROVE, APPROVE, APPROVE]);
+			await tick(models, false);
+			shipScript(gh, { pr: { headRefOid: OTHER_SHA }, diff: `${DIFF}+export const y = 2;\n` });
+			await tick(models, false);
+			assert.equal(models.calls.length, 2);
+			shipScript(gh, { pr: { headRefOid: "c".repeat(40), body: `${pr().body}\nmore` } });
+			await tick(models, false);
+			assert.equal(models.calls.length, 3);
+		});
+
+		it("never reuses a rejection", async () => {
+			const models = fakeModels([REJECT, APPROVE]);
+			await tick(models, false);
+			shipScript(gh, { pr: { headRefOid: OTHER_SHA } });
+			await tick(models, false);
+			assert.equal(models.calls.length, 2);
 		});
 
 		it("reports no usage when no review was needed", async () => {

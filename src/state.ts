@@ -176,7 +176,7 @@ export function notificationFor(event: string, data: Record<string, unknown>): N
 }
 
 /** Independent review verdicts, by `owner/repo#number@headSha`, so a review runs once per exact head commit. */
-export const Reviews = defineDoc<{ byHead: Record<string, { approve: boolean; reasons: string[]; at: number }> }>({
+export const Reviews = defineDoc<{ byHead: Record<string, { approve: boolean; reasons: string[]; at: number; /** Hash of the diff and of the title and description that were reviewed; lets an identical net diff reuse an approval. */ diffHash?: string; textHash?: string; reusedFrom?: string }> }>({
 	kind: "pdl.reviews",
 	version: 1,
 	scope: "session",
