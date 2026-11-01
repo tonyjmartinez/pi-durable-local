@@ -80,11 +80,13 @@ export type Loop = {
 	/** Time-stamped charges (last two days), for the factory-wide daily budget. */
 	spendLog?: { at: number; usd: number }[];
 	/** How the loop gate decides to wake it; see LoopKind in loopgate.ts. Default goal. */
-	kind?: "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "business-review" | "strategy" | "request";
+	kind?: "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "business-review" | "strategy" | "request" | "assistant";
 	/** strategy: indices of the lenses the last runs used (newest last), so the rotation is deterministic. */
 	lensHistory?: number[];
 	/** ci-health: the CI finding the last completed iteration was woken for. */
 	lastCiKey?: string;
+	/** assistant: what needed Tony at its last run (devil.ts attentionKey); unchanged means no model call. */
+	lastAttentionKey?: string;
 	skipIfIdleHours?: number;
 	/** Base branch head when the loop last woke a model. */
 	lastSeenBaseSha?: string;

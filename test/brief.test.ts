@@ -36,6 +36,13 @@ describe("budgetLine", () => {
 	});
 });
 
+describe("agenda in the brief", () => {
+	it("opens with the assistant's latest agenda", () => {
+		const out = buildBrief({ ...base, agenda: { text: "1. pd approve o/r 7 abc1234 - unblocks L46\nWorkers are handling: L52 font question", by: "assistant", updatedAt: base.now - 20 * 60_000 } });
+		assert.match(out, /^YOUR AGENDA \(from assistant, 20m ago\)\n  1\. pd approve o\/r 7 abc1234 - unblocks L46\n  Workers are handling: L52 font question\n/);
+	});
+});
+
 describe("buildBrief", () => {
 	it("says so when nothing needs a general", () => {
 		assert.match(buildBrief(base), /^NEEDS A GENERAL: nothing/);

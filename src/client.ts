@@ -1,5 +1,6 @@
 // pd: terminal client for the pdd daemon.
 import { execFileSync, spawnSync } from "node:child_process";
+import { AGENDA_TOPIC } from "./devil.ts";
 import { priorityOf, queueOrder } from "./queue.ts";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { request } from "node:http";
@@ -263,7 +264,8 @@ async function status(): Promise<void> {
 
 /** What only a general can do, then the workforce. Plain text, so an Opus session can read it in one tool call. */
 async function brief(): Promise<void> {
-	const [s, audit] = await Promise.all([call("GET", "/status"), call("GET", "/audit")]);
+	const [s, audit, memories] = await Promise.all([call("GET", "/status"), call("GET", "/audit"), call("GET", "/memory").catch(() => [])]);
+	const agenda = (memories as Json[]).filter((m) => m.topic === AGENDA_TOPIC).sort((a, b) => b.updatedAt - a.updatedAt)[0];
 	const gh = (args: string[]) => spawnSync("gh", args, { encoding: "utf8", timeout: 30_000 });
 	const openPrs = new Set<string>();
 	for (const park of openParks(audit, new Set(audit.filter((e: Json) => e.event === "parked").map((e: Json) => `${e.repo}#${e.pr}`)))) {
@@ -282,7 +284,7 @@ async function brief(): Promise<void> {
 			? (JSON.parse(out.stdout || "[]") as Json[]).map((i) => ({ repo: i.repository.nameWithOwner, number: i.number, title: i.title, createdAt: i.createdAt, defaultBy: /^Default by:\s*(\S+)/m.exec(i.body ?? "")?.[1] }))
 			: [];
 	});
-	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, proposals, directions: directions as never, ...(s.budget ? { budget: s.budget } : {}) }));
+	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, proposals, directions: directions as never, ...(s.budget ? { budget: s.budget } : {}), ...(agenda ? { agenda: { text: agenda.text, by: agenda.by, updatedAt: agenda.updatedAt } } : {}) }));
 }
 
 function printLoop(loop: Json): void {
@@ -349,7 +351,7 @@ const HELP = `pd — pi-durable sessions that keep running
 
   pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
   pd loop start <session> --preset product-gardener|design-polish|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
-                                   |code-quality|ci-health|devils-advocate|budget-review|business-review|product-strategist
+                                   |code-quality|ci-health|devils-advocate|budget-review|business-review|product-strategist|personal-assistant
                                             product maintainer, cleanup, or maintenance preset
                                             (code-quality waits for the product loop; ci-health wakes on a red base;
                                             devils-advocate audits the factory's process and files findings;

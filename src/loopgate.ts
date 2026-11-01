@@ -2,7 +2,7 @@
 // The cleanup schedule and the "skip if no commits in 24h" rule follow Kent C. Dodds's autopilot cleanup automations
 // (https://github.com/kentcdodds/kcd-skills, MIT). All times are epoch milliseconds.
 
-import { BUDGET_REVIEW_PROMPT, BUSINESS_REVIEW_PROMPT, DEVILS_ADVOCATE_PROMPT } from "./devil.ts";
+import { BUDGET_REVIEW_PROMPT, BUSINESS_REVIEW_PROMPT, DEVILS_ADVOCATE_PROMPT, PERSONAL_ASSISTANT_PROMPT } from "./devil.ts";
 import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } from "./strategist.ts";
 
 /**
@@ -10,7 +10,7 @@ import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } fro
  * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
  * flaky base branch. design: wakes like goal, but is its own kind so a repo can run one product and one design loop.
  */
-export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "business-review" | "strategy" | "request";
+export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "business-review" | "strategy" | "request" | "assistant";
 
 export type GateLoop = {
 	/** Default "goal". */
@@ -141,6 +141,7 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 
 	// The budget reviewer reads factory-wide spend, not this repo: it wakes on its schedule.
 	if (kind === "budget-review") return { wake: true, reason: "scheduled budget review" };
+	if (kind === "assistant") return { wake: true, reason: "scheduled check of what Tony needs" };
 
 	// The business reviewer also wakes on its schedule and never goes dormant, but it yields near the daily cap.
 	if (kind === "business-review") {
@@ -312,7 +313,7 @@ export const DESIGN_POLISH_PROMPT = [
 	"Leave product copy, features and information architecture to the product loop. Do not add fonts, image assets from outside the repo, or dependencies. Name the branch pd/design-<slug> and declare Touches: <area> so it composes with the product loop's PRs; if a product PR is open on the same files, pick another area.",
 ].join("\n");
 
-export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review" | "business-review" | "product-strategist";
+export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review" | "business-review" | "product-strategist" | "personal-assistant";
 
 export const PRODUCT_GARDENER_PROMPT = [
 	"Incrementally improve this repository for its users. Act as the product-minded maintainer, not just a ticket taker.",
@@ -331,6 +332,7 @@ export const LOOP_PROMPTS: Record<LoopPreset, string> = {
 	"devils-advocate": DEVILS_ADVOCATE_PROMPT,
 	"budget-review": BUDGET_REVIEW_PROMPT,
 	"business-review": BUSINESS_REVIEW_PROMPT,
+	"personal-assistant": PERSONAL_ASSISTANT_PROMPT,
 	"product-strategist": PRODUCT_STRATEGIST_PROMPT,
 };
 
@@ -342,5 +344,7 @@ export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
 	// Runs on a schedule whatever the repo does, and is not held back near the cap: that is when it matters most.
 	"budget-review": { kind: "budget-review", intervalMinutes: 4 * 60, budgetUsd: 5 },
 	"business-review": { kind: "business-review", intervalMinutes: 24 * 60, budgetUsd: 3 },
+	// Tony's assistant: looks every 30 minutes, but only calls a model when something that needs him changed.
+	"personal-assistant": { kind: "assistant", intervalMinutes: 30, budgetUsd: 3 },
 	"product-strategist": { kind: "strategy", intervalMinutes: 60, budgetUsd: 10 },
 };
