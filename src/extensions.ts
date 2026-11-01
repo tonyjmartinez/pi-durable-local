@@ -7,7 +7,7 @@ import { openParks } from "./brief.ts";
 /** The assistant runs anyway after this long, even when nothing changed. */
 export const ASSISTANT_FULL_RUN_HOURS = 12;
 import { countUnchecked, lensPrompt, proposalDue, recordLens } from "./strategist.ts";
-import { auditTail } from "./ops.ts";
+import { auditTail, endLiveTask } from "./ops.ts";
 import { repoMap } from "./repomap.ts";
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
@@ -36,6 +36,7 @@ import {
 import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
 import { AUTO_DORMANT_AFTER, afterIteration, CI_RUNS_WINDOW, MAINTENANCE_BRANCH_SLUGS, ciKey, DORMANT_RECHECK_MINUTES, type GatePr, type GateRepo, shouldWake, summarizeRuns, workFingerprint } from "./loopgate.ts";
 import { dailyCapUsd } from "./boost.ts";
+import { CUT_WINDOW_HOURS, cutRefusal, loopResults, parseInterests, recentCutCount, resultsLines } from "./cut.ts";
 import { budgetStatus, dailySpend, nextRoomAt, recordSpend, recordTotal, spendByLoop, totalSpendInWindow } from "./spend.ts";
 
 /** How often a loop waiting on the daily cap looks again (no model call). */
@@ -2083,6 +2084,7 @@ export const Loops_ = defineExtension({
 					byLoop: spendByLoop(loops, now),
 				};
 				const auditEntries = existsSync(AUDIT_LOG) ? (auditTail(AUDIT_LOG, 5000, 4 * 1024 * 1024) as Parameters<typeof buildEvidence>[0]["audit"]) : [];
+				const results = await cutResults(loops, auditEntries, now, context);
 				const assistant = loops.some((loop) => loop.session === caller && loop.kind === "assistant" && loop.status === "active");
 				const owner = assistant ? await ownerItems(auditEntries, loops, context) : undefined;
 				return text(buildEvidence({
@@ -2092,12 +2094,66 @@ export const Loops_ = defineExtension({
 					audit: auditEntries,
 					chat: readChat(undefined, { limit: 20 }),
 					spend,
+					results: resultsLines(results.rows, results.interests),
 					...(args.windowHours === undefined ? {} : { windowHours: args.windowHours }),
 				}));
 			},
 		}),
+		defineTool({
+			name: "loop_cut",
+			description:
+				"Budget-review loops only: PAUSE a loop that is not producing results on Tony's interests (see RESULTS in factory_evidence). Reversible with `pd loop resume <id>`; audited and posted to the agent chat. Refused for urgent, budget-review, assistant and very new loops, for Tony's top interest unless it is stalled, and beyond 3 cuts per 4 hours.",
+			parameters: Type.Object({
+				loopId: Type.String(),
+				reason: Type.String({ minLength: 20, maxLength: 400, description: "The evidence: spend, merges, interest rank, and why the work does not serve Tony's interests." }),
+				offFocus: Type.Optional(Type.Boolean({ description: "True when the loop is on an interest repo but its work is off the stated focus (for example web work when the focus is the Flutter app)." })),
+			}),
+			execute: async (args, api, context) => {
+				const { name: caller } = await sessionCwd(api, api.conversationId, context);
+				const loops = Object.values((await api.snapshot(Loops, context))?.byId ?? {});
+				if (!loops.some((loop) => loop.session === caller && loop.kind === "budget-review" && loop.status === "active")) {
+					return fail("loop_cut is only for a session running a budget-review loop.");
+				}
+				const now = Date.now();
+				const auditEntries = existsSync(AUDIT_LOG) ? (auditTail(AUDIT_LOG, 5000, 4 * 1024 * 1024) as { at?: unknown; event?: unknown; session?: unknown }[]) : [];
+				const { rows } = await cutResults(loops, auditEntries, now, context);
+				const target = rows.find((row) => row.id === args.loopId);
+				const refusal = cutRefusal({
+					target,
+					targetPriority: loops.find((loop) => loop.id === args.loopId)?.priority,
+					callerSession: caller ?? "",
+					offFocus: args.offFocus === true,
+					recentCuts: recentCutCount(auditEntries, now),
+				});
+				if (refusal !== undefined) {
+					audit("loop_cut_refused", { loop: args.loopId, by: caller, reason: refusal });
+					return fail(`Not cut: ${refusal}`);
+				}
+				const reason = args.reason.trim();
+				let taskId: number | undefined;
+				await api.commit(async (tx) => {
+					const loop = (await tx.doc(Loops)).byId[args.loopId];
+					if (loop === undefined || loop.status !== "active") return;
+					taskId = loop.taskId;
+					Object.assign(loop, { status: "paused", note: `cut by ${caller}: ${reason}`.slice(0, 300) });
+				}, context);
+				// Ending a task waits on the Session line, so it happens after the commit, never inside it.
+				await endLiveTask(harness(), taskId, context, { wait: false }).catch(() => undefined);
+				audit("loop_cut", { loop: args.loopId, session: target!.session, by: caller, reason, spentUsd: Number(target!.spentUsd.toFixed(2)), merged: target!.merged, rank: target!.rank ?? null, offFocus: args.offFocus === true });
+				appendChat(makeMessage({ from: caller, to: "all", text: `CUT ${args.loopId} (${target!.session}): ${reason} Undo: pd loop resume ${args.loopId}` }));
+				return text(`Paused ${args.loopId}. Tony or a general can undo it with pd loop resume ${args.loopId}.`);
+			},
+		}),
 	],
 });
+
+/** Tony's ranked interests from policy and each live loop's results against them. */
+async function cutResults(loops: readonly Loop[], auditEntries: readonly { at?: unknown; event?: unknown; session?: unknown }[], now: number, context: Context) {
+	const interests = parseInterests(loadPolicy().loops.ownerInterests);
+	const sessions = (await harness().snapshot(Sessions, context))?.byName ?? {};
+	const rows = loopResults({ loops, repoOf: (session) => githubRepoOf(sessions[session]?.remote), audit: auditEntries, interests, now, windowHours: CUT_WINDOW_HOURS });
+	return { interests, rows };
+}
 
 /** What is waiting on Tony: parked PRs still open, open needs-decision issues, and loops blocked on him. */
 async function ownerItems(auditEntries: readonly { at: string; event: string; repo?: string; pr?: number }[], loops: readonly Loop[], context: Context): Promise<OwnerItems> {
