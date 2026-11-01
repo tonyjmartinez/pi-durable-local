@@ -28,6 +28,7 @@ export function priorityOf(loop: Pick<QueueLoop, "priority" | "kind">): Priority
 			return 2;
 		case "budget-review":
 		case "assistant":
+		case "infra":
 			return 2;
 		case "friction-sweep":
 		case "ci-health":
