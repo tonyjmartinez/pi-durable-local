@@ -24,6 +24,8 @@ export type BriefInput = {
 	proposals?: BriefProposal[];
 	/** The personal assistant's latest agenda for Tony (memory topic owner-agenda). */
 	agenda?: { text: string; by: string; updatedAt: number };
+	/** Latest infra-lead scorecard; recorded evidence, not a fresh live probe. */
+	pipeline?: { text: string; by: string; updatedAt: number };
 	/** The factory budget (see budgetStatus) plus the loop queue's counts. */
 	budget?: { capUsd: number; daySpend: number; exceeded: boolean; weekAvgPerDay?: number; pace?: { windowHours: number; spent: number; allowance: number }; running: number; waiting: number; boosts?: Boost[] };
 };
@@ -80,6 +82,11 @@ export function buildBrief(input: BriefInput): string {
 		lines.push(`YOUR AGENDA (from ${input.agenda.by}, ${age} ago)`, ...input.agenda.text.trim().split("\n").map((line) => `  ${line}`), "");
 	}
 	const parks = openParks(input.audit, input.openPrs);
+	if (input.pipeline !== undefined) {
+		const minutes = Math.max(0, Math.round((input.now - input.pipeline.updatedAt) / 60_000));
+		const age = minutes < 90 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
+		lines.push(`PIPELINE SCORECARD (from ${input.pipeline.by}, ${age} ago; recorded evidence)`, ...input.pipeline.text.trim().split("\n").slice(0, 8).map((line) => `  ${clip(line, 400)}`), "");
+	}
 	// A loop Tony paused himself is not a decision; only system pauses and failures stay.
 	const stuck = input.loops.filter((loop) => (loop.status === "paused" || loop.status === "failed") && !isUserPaused(loop));
 	const asks = input.loops.filter((loop) => loop.needsOwner !== undefined && !stuck.includes(loop) && (loop.status === "active" || loop.status === "paused"));

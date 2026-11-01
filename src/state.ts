@@ -109,6 +109,8 @@ export const Loops = defineDoc<{
 	nextId: number;
 	/** Samples of every session's total cost (last two days), so the daily cap counts spend outside loops too. */
 	factorySpend?: { at: number; total: number }[];
+	/** Transactional rolling-day quota for infra ci_dispatch (independent of audit tail size). */
+	infraDispatches?: number[];
 }>({
 	kind: "pdl.loops",
 	version: 1,

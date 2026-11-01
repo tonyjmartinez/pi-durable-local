@@ -116,3 +116,9 @@ describe("escalations", () => {
 		assert.ok(!out.includes("decision o/r#9"));
 	});
 });
+
+ it("surfaces the recorded pipeline scorecard with age and bounded rows", () => {
+ const out=buildBrief({...base,pipeline:{by:"infra",updatedAt:now-2*3_600_000,text:"A: o/r CI green\nC: o/b tests missing"}});
+ assert.match(out,/PIPELINE SCORECARD \(from infra, 2h ago; recorded evidence\)/);
+ assert.match(out,/C: o\/b tests missing/);
+ });

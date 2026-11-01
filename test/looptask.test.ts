@@ -1339,7 +1339,7 @@ describe("resetDecision", () => {
 });
 
 describe("deferred tools", () => {
-	const DEFERRED = ["web_search", "web_fetch", "memory_forget", "sessions_list", "session_send", "issue_view", "issue_close", "pr_edit", "pr_merge", "friction_file"];
+	const DEFERRED = ["pipeline_evidence", "ci_dispatch", "web_search", "web_fetch", "memory_forget", "sessions_list", "session_send", "issue_view", "issue_close", "pr_edit", "pr_merge", "friction_file"];
 	const all = () => [ext.Memory_, ext.Sessions_, ext.Web_, ext.Git_, ext.Loops_, ext.Subagent_].flatMap((e) => (e as { tools?: { name: string; deferred?: boolean }[] }).tools ?? []);
 
 	it("defers exactly the rarely used tools, and never the ones every loop needs", () => {

@@ -133,6 +133,8 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 	const { loop, repo, now } = input;
 	const kind = loop.kind ?? "goal";
 	const prs = repo.openAgentPrs;
+	// Factory-wide triage must not wait on this session repository’s PRs.
+	if (kind === "infra") return { wake: true, reason: "scheduled pipeline check" };
 
 
 	// Waiting on CI is not work: every open PR is still running its checks, so a model would only watch them.
@@ -143,8 +145,6 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 	// The budget reviewer reads factory-wide spend, not this repo: it wakes on its schedule.
 	if (kind === "budget-review") return { wake: true, reason: "scheduled budget review" };
 	if (kind === "assistant") return { wake: true, reason: "scheduled check of what Tony needs" };
-	// The infra lead watches every repo's pipeline, not this one: its own cost gate (infraWake) runs in the loop task.
-	if (kind === "infra") return { wake: true, reason: "scheduled pipeline check" };
 
 	// The business reviewer also wakes on its schedule and never goes dormant, but it yields near the daily cap.
 	if (kind === "business-review") {

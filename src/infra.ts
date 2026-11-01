@@ -19,7 +19,7 @@ export const MAX_DISPATCHES_PER_DAY = 3;
 export const PIPELINE_MAX_CHARS = 10_000;
 
 /** Pull request check state, counted per open agent PR. */
-export type PrChecks = { failing: number[]; pending: number; passing: number };
+export type PrChecks = { failing: number[]; pending: number; passing: number; unchecked?: number };
 
 /** One project's pipeline as the infra lead sees it. */
 export type PipelineRepo = {
@@ -31,6 +31,8 @@ export type PipelineRepo = {
 	/** True when the runs were readable and there were none: the repo has no CI on its base branch. */
 	noCi?: boolean;
 	prChecks: PrChecks;
+	/** False when PR checks could not be read; absence is not evidence of health. */
+	prChecksReadable?: boolean;
 	/** The repo's ci-health loop, if one exists (any live status). */
 	ciLoop?: { id: string; status: string; dormant: boolean; note?: string };
 };
@@ -55,6 +57,7 @@ export function prChecksOf(prs: readonly { number: number; statusCheckRollup?: r
 		if (state === "fail") out.failing.push(pr.number);
 		else if (state === "pending") out.pending++;
 		else if (state === "pass") out.passing++;
+		else out.unchecked = (out.unchecked ?? 0) + 1;
 	}
 	out.failing.sort((a, b) => a - b);
 	return out;
@@ -74,7 +77,7 @@ const validEntry = (entry: Audit): entry is Audit & { at: string; event: string 
 /** Audit rows about the pipeline: infra events, and ci-health loops reporting anything but "continue". */
 export function infraEvents(audit: readonly Audit[], ciLoopIds: ReadonlySet<string>, since: number): (Audit & { at: string; event: string })[] {
 	return audit.filter(validEntry).filter((entry) => {
-		if (Date.parse(entry.at) < since) return false;
+		if (!Number.isFinite(Date.parse(entry.at)) || Date.parse(entry.at) < since) return false;
 		if (INFRA_EVENTS.has(entry.event)) return true;
 		return entry.event === "loop_report" && typeof entry.loop === "string" && ciLoopIds.has(entry.loop) && entry.status !== "continue";
 	});
@@ -91,7 +94,8 @@ export function pipelineKey(repos: readonly PipelineRepo[], events: readonly { a
 		.map((repo) => [
 			repo.repo,
 			repo.ci === undefined ? (repo.noCi ? "noci" : "?") : `red:${repo.ci.failing.join(",")}|flaky:${repo.ci.flaky.join(",")}`,
-			`prfail:${repo.prChecks.failing.join(",")}`,
+			`prfail:${repo.prChecks.failing.join(",")}|readable:${repo.prChecksReadable !== false}`,
+			...(isRed(repo) ? [`redhead:${repo.ci!.headSha}`] : []),
 			repo.ciLoop === undefined ? "noloop" : `${repo.ciLoop.id}:${repo.ciLoop.status}${repo.ciLoop.dormant ? ":dormant" : ""}`,
 		].join(" "));
 	const newest = events.reduce((max, entry) => (entry.at > max ? entry.at : max), "");
@@ -115,7 +119,14 @@ export function infraWake(input: { key: string; lastKey?: string; lastRunAt?: nu
 
 /** ci_dispatch calls in the last 24 hours, from the audit log. */
 export function recentDispatches(audit: readonly Audit[], now: number): number {
-	return audit.filter(validEntry).filter((entry) => entry.event === "infra_dispatch" && now - Date.parse(entry.at) < 24 * 3_600_000).length;
+	return audit.filter(validEntry).filter((entry) => entry.event === "infra_dispatch" && Date.parse(entry.at) <= now && now - Date.parse(entry.at) < 24 * 3_600_000).length;
+}
+
+/** Reserve inside the loop-document transaction; failures roll back with task creation. */
+export function reserveDispatch(doc: { infraDispatches?: number[] }, now: number): void {
+ const recent = (doc.infraDispatches ?? []).filter((at) => at > now - 24 * 3_600_000);
+ if (recent.length >= MAX_DISPATCHES_PER_DAY) throw new Error("infra dispatch quota reached (3 per rolling 24h)");
+ doc.infraDispatches = [...recent, now];
 }
 
 export type DispatchInput = {
@@ -157,12 +168,12 @@ const clip = (text: string, length: number) => {
 
 function repoLine(repo: PipelineRepo): string {
 	const ci = repo.ci === undefined
-		? repo.noCi ? "NO CI on the base branch" : "CI unreadable"
-		: isRed(repo) ? `CI RED on ${repo.ci.headSha.slice(0, 7)}: ${repo.ci.failing.join(", ")}` : isFlaky(repo) ? `CI FLAKY: ${repo.ci.flaky.join(", ")}` : "CI green";
+		? repo.noCi ? "NO RECENT CI RUNS on the base branch" : "CI unreadable"
+		: isRed(repo) ? `CI RED on ${repo.ci.headSha.slice(0, 7)}: ${repo.ci.failing.join(", ")}` : isFlaky(repo) ? `CI FLAKY: ${repo.ci.flaky.join(", ")}` : "no failing completed CI runs";
 	const prs = repo.prChecks;
-	const prText = prs.failing.length + prs.pending + prs.passing === 0
+	const prText = repo.prChecksReadable === false ? "agent PR checks unreadable" : prs.failing.length + prs.pending + prs.passing + (prs.unchecked ?? 0) === 0
 		? "no open agent PRs"
-		: `agent PRs: ${prs.failing.length > 0 ? `${prs.failing.length} failing checks (${prs.failing.map((n) => `#${n}`).join(", ")}), ` : ""}${prs.pending} pending, ${prs.passing} passing`;
+		: `agent PRs: ${prs.failing.length > 0 ? `${prs.failing.length} failing checks (${prs.failing.map((n) => `#${n}`).join(", ")}), ` : ""}${prs.pending} pending, ${prs.passing} passing${prs.unchecked ? `, ${prs.unchecked} without checks` : ""}`;
 	const loop = repo.ciLoop === undefined
 		? "no ci-health loop"
 		: `ci-health ${repo.ciLoop.id} ${repo.ciLoop.status}${repo.ciLoop.dormant ? " dormant" : ""}${repo.ciLoop.note ? ` (${clip(repo.ciLoop.note, 100)})` : ""}`;
@@ -195,7 +206,7 @@ export function buildPipelineDigest(input: PipelineDigestInput): string {
 	} else {
 		lines.push(`ci_dispatch left today: ${input.dispatchesLeft}`, "");
 	}
-	lines.push(`PIPELINE (${repos.length} repos with live loops): ${red} red, ${flaky} flaky, ${noCi} without CI, ${uncovered} with CI but no ci-health loop`);
+	lines.push(`PIPELINE (${repos.length} repos with live loops): ${red} red, ${flaky} flaky, ${noCi} without recent CI runs, ${uncovered} with CI but no ci-health loop`);
 	for (const repo of repos) lines.push(repoLine(repo));
 
 	const ciLoopIds = new Set(repos.flatMap((r) => (r.ciLoop ? [r.ciLoop.id] : [])));
@@ -214,7 +225,7 @@ export function buildPipelineDigest(input: PipelineDigestInput): string {
 
 export const INFRA_LEAD_PROMPT = `You are the factory's infrastructure lead: the senior owner of build, test and deploy confidence across every project. Tony owns the factory and the Claude Code "generals" supervise it; you sit just under them, above the workers. You are a manager, not a mechanic: you write no product code, open no PRs and edit no files yourself. Your job is that every repo has CI that runs its real tests, that base branches stay green, that flaky tests get fixed at the cause, that agent PRs are not stuck on failing checks, and that nothing reaches a deploy branch untested. You do it within a tight budget, by putting the cheapest capable worker on the most important gap.
 
-Your powers:
+Your powers (load pipeline_evidence and ci_dispatch with tool_search first):
 - pipeline_evidence: every project's base-branch CI (red, flaky, none), agent PR checks, ci-health loop coverage, build and deploy events from the audit log, and the spending rate. Read-only.
 - ci_dispatch: start a ci-health loop on a repo that has CI but no ci-health loop, or resume a paused one. A ci-health loop costs nothing while its base is green; it only calls a model on a red or flaky base. Limited to ${MAX_DISPATCHES_PER_DAY} per 24h and refused while spend is over the pacing allowance. It will not overturn a person's pause or the budget reviewer's cut.
 - session_send: hand ONE well-specified ticket to a project session (at most two per run). Every message costs that session a paid turn, so send a ticket only when it changes what they do, and make it complete: the gap, the evidence, the exact change, how to verify, and the branch prefix pd/ci-.
