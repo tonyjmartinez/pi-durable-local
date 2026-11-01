@@ -1,12 +1,11 @@
 // pd: terminal client for the pdd daemon.
 import { execFileSync, spawnSync } from "node:child_process";
-import { AGENDA_TOPIC } from "./devil.ts";
 import { priorityOf, queueOrder } from "./queue.ts";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { request } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { buildBrief, openParks } from "./brief.ts";
+import { collectBrief } from "./briefdata.ts";
 import { analyzeTranscript, formatCostReport } from "./costreport.ts";
 import { DB_PATH, ENV_FILE, loadSecrets, POLICY_FILE, SOCKET_PATH } from "./config.ts";
 import { describeBoost } from "./boost.ts";
@@ -265,27 +264,7 @@ async function status(): Promise<void> {
 
 /** What only a general can do, then the workforce. Plain text, so an Opus session can read it in one tool call. */
 async function brief(): Promise<void> {
-	const [s, audit, memories] = await Promise.all([call("GET", "/status"), call("GET", "/audit"), call("GET", "/memory").catch(() => [])]);
-	const agenda = (memories as Json[]).filter((m) => m.topic === AGENDA_TOPIC).sort((a, b) => b.updatedAt - a.updatedAt)[0];
-	const gh = (args: string[]) => spawnSync("gh", args, { encoding: "utf8", timeout: 30_000 });
-	const openPrs = new Set<string>();
-	for (const park of openParks(audit, new Set(audit.filter((e: Json) => e.event === "parked").map((e: Json) => `${e.repo}#${e.pr}`)))) {
-		if (gh(["pr", "view", String(park.pr), "-R", park.repo, "--json", "state", "--jq", ".state"]).stdout.trim() === "OPEN") openPrs.add(park.key);
-	}
-	const owners = [...new Set(audit.map((e: Json) => e.repo?.split("/")[0]).filter(Boolean))] as string[];
-	const decisions = owners.flatMap((owner) => {
-		const out = gh(["search", "issues", "--owner", owner, "--label", "needs-decision", "--state", "open", "--json", "repository,number,title"]);
-		return out.status === 0 ? (JSON.parse(out.stdout || "[]") as Json[]).map((i) => ({ repo: i.repository.nameWithOwner, number: i.number, title: i.title })) : [];
-	});
-	const dirs = (await call("GET", "/directions")) as Record<string, Json>;
-	const directions = Object.entries(dirs).map(([key, d]) => ({ key, ...d }));
-	const proposals = owners.flatMap((owner) => {
-		const out = gh(["search", "issues", "--owner", owner, "--label", "proposal", "--state", "open", "--json", "repository,number,title,createdAt,body"]);
-		return out.status === 0
-			? (JSON.parse(out.stdout || "[]") as Json[]).map((i) => ({ repo: i.repository.nameWithOwner, number: i.number, title: i.title, createdAt: i.createdAt, defaultBy: /^Default by:\s*(\S+)/m.exec(i.body ?? "")?.[1] }))
-			: [];
-	});
-	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, proposals, directions: directions as never, ...(s.budget ? { budget: s.budget } : {}), ...(agenda ? { agenda: { text: agenda.text, by: agenda.by, updatedAt: agenda.updatedAt } } : {}) }));
+	console.log(await collectBrief(call));
 }
 
 function printLoop(loop: Json): void {

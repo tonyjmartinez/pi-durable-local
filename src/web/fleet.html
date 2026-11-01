@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>pd fleet</title>
+<style>
+:root { --bg: #ffffff; --panel: #f6f7f9; --ink: #1b1f24; --dim: #5d6672; --line: #dde1e6; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --accent: #2563eb; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --bg: #14171c; --panel: #1c2027; --ink: #e6e9ee; --dim: #97a1ad; --line: #2b323b; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --accent: #5b8def; }
+}
+:root[data-theme="dark"] { --bg: #14171c; --panel: #1c2027; --ink: #e6e9ee; --dim: #97a1ad; --line: #2b323b; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --accent: #5b8def; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, sans-serif; padding: 12px; }
+header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+h1 { font-size: 15px; margin: 0; flex: 1; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 14px 0 6px; }
+.dim { color: var(--dim); font-size: 12px; }
+.stale { color: var(--warn); }
+button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.tile { background: var(--panel); border-radius: 8px; padding: 8px 10px; }
+.tile b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+.meter { height: 4px; background: var(--line); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--accent); }
+.meter i.over { background: var(--bad); }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; }
+.card.ask { border-color: var(--warn); }
+.row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.id { font-weight: 600; font-variant-numeric: tabular-nums; }
+.pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; }
+.s-active { color: var(--ok); } .s-paused { color: var(--warn); } .s-failed { color: var(--bad); } .s-dormant { color: var(--dim); }
+.grow { flex: 1; min-width: 0; }
+.goal { margin-top: 3px; overflow-wrap: anywhere; }
+.sessions { display: flex; flex-wrap: wrap; gap: 6px; }
+.sess { background: var(--panel); border-radius: 6px; padding: 3px 8px; font-size: 12px; }
+.sess.busy { outline: 1px solid var(--warn); }
+#empty { color: var(--dim); padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Software factory</h1>
+  <span id="age" class="dim">waiting for data…</span>
+  <button id="refresh" type="button" disabled>Refresh</button>
+</header>
+<div id="root"><div id="empty">Loading the fleet snapshot…</div></div>
+<script>
+(() => {
+  // Talks to the host two ways: the MCP Apps postMessage bridge (Claude, ChatGPT) and ChatGPT's window.openai.
+  // It makes no network calls of its own; refresh asks the host to call fleet_status again.
+  let snap = null, nextId = 1, bridged = false;
+  const pending = new Map();
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
+  const money = (n) => `$${Number(n || 0).toFixed(2)}`;
+  const ago = (t) => { if (!t) return "-"; const m = Math.round((t - Date.now()) / 60000); return m >= 0 ? (m < 90 ? `in ${m}m` : `in ${Math.round(m / 60)}h`) : (-m < 90 ? `${-m}m ago` : `${Math.round(-m / 60)}h ago`); };
+
+  function rpc(method, params) {
+    const id = nextId++;
+    window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+    return new Promise((resolve, reject) => { pending.set(id, { resolve, reject }); setTimeout(() => { if (pending.delete(id)) reject(new Error("host did not answer")); }, 30000); });
+  }
+  const notify = (method, params) => window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+
+  function accept(result) {
+    const data = result && (result.structuredContent || result);
+    if (data && Array.isArray(data.sessions) && Array.isArray(data.loops)) { snap = data; render(); }
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const m = event.data;
+    if (!m || m.jsonrpc !== "2.0") return;
+    if (m.id !== undefined && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.reject(new Error(m.error.message)) : p.resolve(m.result); return; }
+    if (m.method === "ui/notifications/tool-result") accept(m.params);
+    else if (m.method === "ui/notifications/host-context-changed" && m.params && m.params.theme) document.documentElement.dataset.theme = m.params.theme;
+  });
+
+  async function refresh() {
+    $("refresh").disabled = true;
+    try {
+      if (window.openai && typeof window.openai.callTool === "function") accept(await window.openai.callTool("fleet_status", {}));
+      else accept(await rpc("tools/call", { name: "fleet_status", arguments: {} }));
+    } catch (e) { $("age").textContent = `refresh failed: ${e.message}`; }
+    $("refresh").disabled = false;
+  }
+  $("refresh").addEventListener("click", refresh);
+
+  function render() {
+    const root = $("root"); root.replaceChildren();
+    const b = snap.budget;
+    const tiles = el("div", "tiles");
+    const tile = (label, value, pct) => { const t = el("div", "tile"); t.append(el("b", "", value), el("span", "dim", label)); if (pct !== undefined) { const m = el("div", "meter"), i = el("i", pct > 100 ? "over" : ""); i.style.width = `${Math.min(pct, 100)}%`; m.append(i); t.append(m); } tiles.append(t); };
+    tile("sessions busy", `${snap.sessions.filter((s) => s.busy).length}/${snap.sessions.length}`);
+    tile("loops scheduled", String(snap.loops.filter((l) => l.status === "active").length));
+    if (b) {
+      tile(`24h of $${b.capUsd} cap`, money(b.daySpend), b.capUsd ? (b.daySpend / b.capUsd) * 100 : undefined);
+      if (b.pace) tile(`last ${b.pace.windowHours}h of ${money(b.pace.allowance)} pace`, money(b.pace.spent), b.pace.allowance ? (b.pace.spent / b.pace.allowance) * 100 : undefined);
+      tile("running / waiting", `${b.running} / ${b.waiting}`);
+    }
+    root.append(tiles);
+
+    const needs = snap.loops.filter((l) => l.needsOwner || l.status === "failed" || (l.status === "paused" && !l.userPaused));
+    if (needs.length) { root.append(el("h2", "", `Needs you (${needs.length})`)); needs.forEach((l) => root.append(loopCard(l, true))); }
+    const rank = (l) => (l.userPaused ? 2 : l.status === "dormant" ? 1 : 0);
+    const rest = snap.loops.filter((l) => !needs.includes(l)).sort((a, c) => rank(a) - rank(c) || (a.nextRunAt || 0) - (c.nextRunAt || 0));
+    root.append(el("h2", "", `Loops (${rest.length})`));
+    if (!rest.length) root.append(el("div", "dim", "No other open loops."));
+    rest.forEach((l) => root.append(loopCard(l, false)));
+
+    root.append(el("h2", "", "Sessions"));
+    const ss = el("div", "sessions");
+    snap.sessions.slice().sort((a, c) => c.busy - a.busy || c.cost - a.cost).forEach((s) => { const n = el("span", `sess${s.busy ? " busy" : ""}`, `${s.busy ? "● " : ""}${s.name} ${money(s.cost)}`); n.title = s.purpose || ""; ss.append(n); });
+    root.append(ss);
+    if (snap.finishedLoops) root.append(el("p", "dim", `${snap.finishedLoops} finished loops hidden. Read-only view: control actions come in a later phase.`));
+    stamp();
+    notify("ui/notifications/size-changed", { height: document.documentElement.scrollHeight });
+  }
+
+  function loopCard(l, ask) {
+    const c = el("div", `card${ask ? " ask" : ""}`), r = el("div", "row");
+    r.append(el("span", "id", l.id), el("span", `pill s-${l.status}`, l.userPaused ? "paused by you" : l.status), el("span", "grow", l.session), el("span", "dim", `${money(l.spent)}/${money(l.budgetUsd)} · ${l.maxIterations > 1000 ? `run ${l.iteration}` : `${l.iteration}/${l.maxIterations}`}${l.nextRunAt ? ` · next ${ago(l.nextRunAt)}` : ""}`));
+    c.append(r);
+    if (l.needsOwner) { c.append(el("div", "goal", `Asks: ${l.needsOwner.ask}`)); if (l.needsOwner.recommendation) c.append(el("div", "dim", `Recommends: ${l.needsOwner.recommendation}`)); }
+    else c.append(el("div", "goal dim", l.userPaused ? l.goal : l.note || l.goal));
+    return c;
+  }
+
+  function stamp() {
+    if (!snap) return;
+    const mins = Math.round((Date.now() - snap.at) / 60000);
+    $("age").textContent = mins < 1 ? "updated just now" : `updated ${mins}m ago`;
+    $("age").className = mins >= 15 ? "dim stale" : "dim";
+  }
+  setInterval(stamp, 30000);
+
+  // ChatGPT globals, when present.
+  const fromOpenai = () => { if (window.openai && window.openai.toolOutput) accept(window.openai.toolOutput); if (window.openai && window.openai.theme) document.documentElement.dataset.theme = window.openai.theme; };
+  window.addEventListener("openai:set_globals", fromOpenai);
+  fromOpenai();
+
+  // MCP Apps handshake.
+  rpc("ui/initialize", { protocolVersion: "2026-01-26", appInfo: { name: "pd-fleet", version: "0.1.0" }, appCapabilities: {} })
+    .then((init) => { bridged = true; notify("ui/notifications/initialized", {}); if (init && init.hostContext && init.hostContext.theme) document.documentElement.dataset.theme = init.hostContext.theme; })
+    .catch(() => {})
+    .finally(() => { $("refresh").disabled = !(bridged || (window.openai && window.openai.callTool)); });
+})();
+</script>
+</body>
+</html>
