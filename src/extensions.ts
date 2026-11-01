@@ -895,6 +895,23 @@ export async function tickPr(
 		const sha = facts.pr.headRefOid;
 		// The diff of exactly the commit this verdict will be stored under, never "the PR as of now".
 		const diff = await gh(["api", `repos/${repo}/compare/${facts.pr.baseRefName}...${sha}`, "-H", "Accept: application/vnd.github.diff"], context);
+		// A head that changed only on the merge-base side (merge main, rebase, empty commit) has a byte-identical net diff:
+		// reuse that head's approval instead of paying again. Any difference in the diff, title or description re-reviews.
+		const diffHash = createHash("sha256").update(diff).digest("hex");
+		const textHash = createHash("sha256").update(`${facts.pr.title}\n${facts.pr.body ?? ""}`).digest("hex");
+		const prefix = `${repo}#${number}@`;
+		const earlier = Object.entries((await harnessLike.snapshot(Reviews, context))?.byHead ?? {}).find(
+			([key, v]) => key.startsWith(prefix) && key !== facts.reviewKey && v.approve && v.diffHash === diffHash && v.textHash === textHash,
+		);
+		if (earlier !== undefined) {
+			await harnessLike.commit(async (tx) => {
+				(await tx.doc(Reviews)).byHead[facts.reviewKey] = { approve: true, reasons: earlier[1].reasons, at: Date.now(), diffHash, textHash, reusedFrom: earlier[0] };
+			}, context);
+			audit("review_reused", { session: options.session, repo, pr: number, sha, from: earlier[0] });
+			facts = await gatherShipFacts(repo, number, policy, harnessLike, context);
+			decision = decideShip(facts.state);
+			return;
+		}
 		const { usage: reviewUsage, ...verdict } = await reviewWith(models, policy, context)(facts.pr, diff);
 		usage = addUsage(usage, reviewUsage);
 		const now = JSON.parse(await gh(["pr", "view", String(number), "--repo", repo, "--json", "headRefOid,title,body"], context)) as { headRefOid: string; title: string; body: string };
@@ -903,7 +920,7 @@ export async function tickPr(
 			throw Object.assign(new Error("the PR changed while it was being reviewed; tick again"), { usage });
 		}
 		await harnessLike.commit(async (tx) => {
-			(await tx.doc(Reviews)).byHead[facts.reviewKey] = { ...verdict, at: Date.now() };
+			(await tx.doc(Reviews)).byHead[facts.reviewKey] = { ...verdict, at: Date.now(), diffHash, textHash };
 		}, context);
 		audit("reviewed", { session: options.session, repo, pr: number, sha, approve: verdict.approve, reasons: verdict.reasons });
 		reviewed = true;

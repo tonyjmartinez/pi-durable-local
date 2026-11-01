@@ -219,7 +219,10 @@ describe("the review race", () => {
 		assert.equal(models.calls.length, 2, "edited description: reviewed again");
 		script({ pr: { headRefOid: OTHER_SHA } });
 		await tick(models, false);
-		assert.equal(models.calls.length, 3, "new commit: reviewed again");
+		assert.equal(models.calls.length, 2, "new commit, identical diff: the approval is reused");
+		script({ pr: { headRefOid: "c".repeat(40) }, diff: "diff --git a/x b/x\n+changed\n" });
+		await tick(models, false);
+		assert.equal(models.calls.length, 3, "new commit that changes the diff: reviewed again");
 	});
 });
 
