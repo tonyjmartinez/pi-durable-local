@@ -430,8 +430,11 @@ const routes: [string, RegExp, Route][] = [
 			const out = applyDirection(await tx.doc(Directions), key, { text: String(body.text ?? ""), by, now: Date.now() }, loops);
 			for (const id of out.woken) {
 				const loop = (await tx.doc(Loops)).byId[id]!;
+				// A harness-level commit has no conversation of its own: the loop's task lives in its session's conversation.
+				const conversationId = sessions[loop.session]?.conversationId;
+				if (conversationId === undefined) continue;
 				if (loop.taskId !== undefined) replaced.push(loop.taskId);
-				loop.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true });
+				loop.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true, conversationId: conversationId as never });
 				woken.push(id);
 			}
 			return { direction: JSON.parse(JSON.stringify(out.direction)) as unknown, loops: Object.keys((out.direction as { acks: object }).acks) };
