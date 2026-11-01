@@ -3,13 +3,14 @@
 // (https://github.com/kentcdodds/kcd-skills, MIT). All times are epoch milliseconds.
 
 import { BUDGET_REVIEW_PROMPT, DEVILS_ADVOCATE_PROMPT } from "./devil.ts";
+import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } from "./strategist.ts";
 
 /**
  * goal: always wakes. cleanup: skips when the base branch is idle. friction-sweep: skips with no open friction.
  * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
  * flaky base branch. design: wakes like goal, but is its own kind so a repo can run one product and one design loop.
  */
-export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "request";
+export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "strategy" | "request";
 
 export type GateLoop = {
 	/** Default "goal". */
@@ -59,6 +60,8 @@ export type GateRepo = {
 	dailySpendShare?: number;
 	/** ci-health: undefined when the runs could not be read. */
 	ci?: GateCi;
+	/** strategy: facts the strategist's wake rule needs (see strategist.ts). */
+	strategist?: Omit<StrategistSignals, "hoursSinceLastRun" | "newMerges" | "lastRunAt">;
 };
 
 export type WakeDecision = { wake: boolean; reason: string; nextCheckMinutes?: number };
@@ -148,7 +151,7 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 
 	// Maintenance waits while product loops need the day's budget. A red base branch is the exception: it blocks
 	// every product PR anyway.
-	const maintenance = kind === "code-quality" || kind === "ci-health" || kind === "devils-advocate";
+	const maintenance = kind === "code-quality" || kind === "ci-health" || kind === "devils-advocate" || kind === "strategy";
 	const baseRed = kind === "ci-health" && repo.ci !== undefined && repo.ci.failing.length > 0;
 	if (maintenance && !baseRed && repo.dailySpendShare !== undefined && repo.dailySpendShare >= MAINTENANCE_SHARE_OF_DAILY) {
 		return { wake: false, reason: `today's spend is ${Math.round(repo.dailySpendShare * 100)}% of the daily cap; product loops go first`, nextCheckMinutes: IDLE_RECHECK_MINUTES };
@@ -164,6 +167,16 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 			repo.ci.flaky.length > 0 ? `flaky: ${repo.ci.flaky.join(", ")}` : undefined,
 		].filter(Boolean);
 		return { wake: true, reason: `base branch CI ${parts.join("; ")}` };
+	}
+
+	if (kind === "strategy") {
+		const changed = repo.lastSeenBaseSha !== undefined ? repo.lastSeenBaseSha !== repo.baseHeadSha : loop.lastRunAt === undefined || repo.baseHeadCommittedAt > loop.lastRunAt;
+		return strategistWake({
+			...repo.strategist,
+			...(loop.lastRunAt !== undefined ? { lastRunAt: loop.lastRunAt } : {}),
+			newMerges: changed,
+			...(loop.lastRunAt !== undefined ? { hoursSinceLastRun: (now - loop.lastRunAt) / HOUR } : {}),
+		});
 	}
 
 	if (kind === "code-quality" && repo.productLoopActive === true) {
@@ -287,10 +300,11 @@ export const DESIGN_POLISH_PROMPT = [
 	"Orient first: read the project instructions, README, and any design or art direction docs (for example DESIGN_NOTES.md, docs/ART.md, a design-tokens or theme file), then recent commits and open PRs. Follow the established direction; do not invent a new one. If none exists and the visuals are inconsistent, your first PR may be a short design doc that names the existing palette, type scale and spacing as found in the code.",
 	"Choose one small, reversible design improvement: unify a one-off colour or spacing value onto the existing tokens, fix an inconsistent component state, improve a mobile layout, sharpen hierarchy on one screen, or make a game sprite or effect read more clearly. State the user problem and why it is the best next step in the PR.",
 	"Look before and after: Playwright Chromium is installed, so run the repo's a11y and e2e checks and take screenshots at phone (390px) and desktop widths, in light and dark if the repo has both. Do not run playwright install. Commit no screenshots unless the repo already keeps them; describe what they showed in the PR's Testing section, along with anything you could not check.",
+	"When the a11y and token checklist is clean, do not idle: take a screenshot at phone and desktop widths and critique it against the direction or art doc. Add the best design idea to docs/IDEAS.md (lens: delight or genre teardown; fields: id, title, evidence, user problem, bet, size, door, status new) in a small docs PR, or ship it if it is a small two-way change. A proposal to change the established direction itself is allowed, but only as a proposal issue (friction_file with labels needs-decision and proposal), never as an unreviewed redesign.",
 	"Leave product copy, features and information architecture to the product loop. Do not add fonts, image assets from outside the repo, or dependencies. Name the branch pd/design-<slug> and declare Touches: <area> so it composes with the product loop's PRs; if a product PR is open on the same files, pick another area.",
 ].join("\n");
 
-export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review";
+export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review" | "product-strategist";
 
 export const PRODUCT_GARDENER_PROMPT = [
 	"Incrementally improve this repository for its users. Act as the product-minded maintainer, not just a ticket taker.",
@@ -298,7 +312,8 @@ export const PRODUCT_GARDENER_PROMPT = [
 	"For an application or site, look for a small improvement to usability, accessibility, reliability, or performance. For a library or developer tool, reduce a concrete user or contributor pain point. Prefer evidence already in the repository and avoid broad speculative research.",
 	"Choose one small, useful, reversible improvement yourself. State the user problem and why this is the best next step in the PR. For uncertain but low-risk product choices, make a conservative assumption, record it, and continue without asking the owner.",
 	"Follow the repository contribution rules and existing stack. Find and run its documented verification command. Avoid new dependencies, migrations, public API changes, unverified factual claims, and changes to protected paths unless the project rules allow them and there is a clear need.",
-	"Do not make irreversible product, privacy, security, financial, legal, or public-commitment decisions. If the next useful step requires owner-only facts or crosses a human gate, explain the exact blocker and recommend a next step, and set loop_report.needsOwner (ask, options, recommendation) whatever the status. If no worthwhile small change is supported by evidence, do no code work and report that."
+	"Do not make irreversible product, privacy, security, financial, legal, or public-commitment decisions. If the next useful step requires owner-only facts or crosses a human gate, explain the exact blocker and recommend a next step, and set loop_report.needsOwner (ask, options, recommendation) whatever the status.",
+	"Where to find work: take the next unclaimed item in ROADMAP.md (one no open PR covers). If there is none, take the top two-way idea in docs/IDEAS.md whose status is new or roadmapped, and mark it shipped when it lands. If both are empty, do no code work and report loop_report status \"idle\": that wakes the product strategist, which refills the roadmap. Do not invent busywork, and do not go idle while either file has an unclaimed two-way item."
 ].join("\n");
 
 export const LOOP_PROMPTS: Record<LoopPreset, string> = {
@@ -307,6 +322,7 @@ export const LOOP_PROMPTS: Record<LoopPreset, string> = {
 	"design-polish": DESIGN_POLISH_PROMPT,
 	"devils-advocate": DEVILS_ADVOCATE_PROMPT,
 	"budget-review": BUDGET_REVIEW_PROMPT,
+	"product-strategist": PRODUCT_STRATEGIST_PROMPT,
 };
 
 export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
@@ -316,4 +332,5 @@ export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
 	"devils-advocate": { kind: "devils-advocate", intervalMinutes: 6 * 60, budgetUsd: 3 },
 	// Runs on a schedule whatever the repo does, and is not held back near the cap: that is when it matters most.
 	"budget-review": { kind: "budget-review", intervalMinutes: 4 * 60, budgetUsd: 5 },
+	"product-strategist": { kind: "strategy", intervalMinutes: 60, budgetUsd: 10 },
 };

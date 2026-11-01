@@ -2,6 +2,7 @@
 // the gated PR merge, project loops, and the safety guard.
 import { appendChat, makeMessage, readChat } from "./chat.ts";
 import { buildEvidence } from "./devil.ts";
+import { countUnchecked, lensPrompt, proposalDue, recordLens } from "./strategist.ts";
 import { auditTail } from "./ops.ts";
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
@@ -1444,7 +1445,7 @@ export async function allSessionsCost(reader: { snapshot: Harness["snapshot"] },
 export function loopPrompt(loop: Loop, policy: Policy, wakeReason?: string, direction?: Direction, oldPrs: readonly { number: number }[] = []): string {
 	return `[loop ${loop.id}, iteration ${loop.iteration + 1}/${loop.maxIterations}]
 ${wakeReason ? `Woken because: ${wakeReason}
-` : ""}${directionPrompt(direction, loop.id, oldPrs)}Ongoing goal: ${loop.goal}
+` : ""}${directionPrompt(direction, loop.id, oldPrs)}${loop.kind === "strategy" ? `${lensPrompt(loop.lensHistory ?? [])}\n\n` : ""}Ongoing goal: ${loop.goal}
 
 Next work item: ${loop.nextTask || "Choose one small slice of the ongoing goal, then save the following slice with loop_report.nextTask."}
 
@@ -1504,6 +1505,21 @@ export function productLoopActive(loop: Pick<Loop, "id" | "session">, extras: Pi
 		other.id !== loop.id && other.status === "active" && other.dormant === undefined && ["goal", "design"].includes(other.kind ?? "goal") && repoOf(other.session) === mine);
 }
 
+/**
+ * When the repo's product loop (goal) went quiet, if it is quiet now: its dormant.since, or for an idle report
+ * without dormancy its lastRunAt. The latest such moment across the repo's goal loops; undefined when none is quiet.
+ */
+export function productIdleSince(loop: Pick<Loop, "id" | "session">, extras: Pick<GateExtras, "allLoops" | "sessions">): number | undefined {
+	const repoOf = (name: string) => githubRepoOf(extras.sessions[name]?.remote);
+	const mine = repoOf(loop.session);
+	if (mine === undefined) return undefined;
+	const times = extras.allLoops
+		.filter((other) => other.id !== loop.id && other.status === "active" && (other.kind ?? "goal") === "goal" && repoOf(other.session) === mine)
+		.map((other) => other.dormant?.since ?? (other.idleReported === true ? other.lastRunAt ?? 0 : undefined))
+		.filter((t): t is number => t !== undefined);
+	return times.length === 0 ? undefined : Math.max(...times);
+}
+
 /** What the loop gate needs, from GitHub via the daemon's gh: no model call, a handful of API requests. */
 async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, context: Context, extras?: GateExtras): Promise<GateRepo | undefined> {
 	const repo = githubRepoOf(session.remote);
@@ -1532,6 +1548,18 @@ async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, conte
 			.then((out) => summarizeRuns(JSON.parse(out)))
 			.catch(() => undefined)
 		: undefined;
+	// The strategist's roadmap signal: unchecked ROADMAP.md items that no open agent PR is already working on.
+	const strategist = loop.kind === "strategy"
+		? {
+			...(extras !== undefined && productIdleSince(loop, extras) !== undefined ? { productIdleSince: productIdleSince(loop, extras)! } : {}),
+			proposalDue: await gh(["issue", "list", "--repo", repo, "--label", "proposal", "--state", "open", "--json", "body", "--jq", "[.[].body]"], context)
+				.then((out) => proposalDue(JSON.parse(out) as string[], Date.now()))
+				.catch(() => false),
+			...(await gh(["api", `repos/${repo}/contents/ROADMAP.md?ref=${base}`, "-H", "Accept: application/vnd.github.raw"], context)
+				.then((text) => ({ roadmapUnclaimed: Math.max(0, countUnchecked(text) - openAgentPrs.length) }))
+				.catch(() => ({}))),
+		}
+		: undefined;
 	return {
 		baseHeadSha: head.sha,
 		baseHeadCommittedAt: Date.parse(head.at),
@@ -1542,6 +1570,7 @@ async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, conte
 		...(loop.kind === "code-quality" && extras !== undefined ? { productLoopActive: productLoopActive(loop, extras) } : {}),
 		...(extras?.dailySpendShare !== undefined ? { dailySpendShare: extras.dailySpendShare } : {}),
 		...(ci !== undefined ? { ci } : {}),
+		...(strategist !== undefined ? { strategist } : {}),
 	};
 }
 
@@ -1794,6 +1823,7 @@ export const Loops_ = defineExtension({
 				status: Type.Union([Type.Literal("continue"), Type.Literal("idle"), Type.Literal("done"), Type.Literal("blocked")]),
 				note: Type.String(),
 				directionVersion: Type.Optional(Type.Number({ description: "The version of the current direction you worked under (shown in the prompt); confirms you saw it." })),
+				lens: Type.Optional(Type.Number({ description: "Strategist loops: the 1-based lens you actually used, if not the one assigned." })),
 				nextTask: Type.Optional(Type.String({ maxLength: 1200, description: "One bounded next slice: relevant files, acceptance criteria, next action. Empty or omitted clears the previous item." })),
 				needsOwner: Type.Optional(
 					Type.Object(
@@ -1819,6 +1849,7 @@ export const Loops_ = defineExtension({
 					loop.nextTask = args.nextTask?.trim() || undefined;
 					if (args.needsOwner !== undefined && args.needsOwner.ask.trim() !== "") loop.needsOwner = args.needsOwner;
 					else delete loop.needsOwner;
+					if (loop.kind === "strategy") loop.lensHistory = recordLens(loop.lensHistory ?? [], args.lens);
 					if (args.status === "idle") loop.idleReported = true;
 					else if (loop.status === "active" && args.status !== "continue") loop.status = args.status === "done" ? "done" : "paused";
 					// "continue" from a dormant loop (work done outside a tick, e.g. on a message) means there is work again.
