@@ -111,6 +111,7 @@ describe("pd-mcp protocol", () => {
 		const read = await rpc("resources/read", { uri: FLEET_URI });
 		assert.equal(read.json.result.contents[0].mimeType, "text/html;profile=mcp-app");
 		assert.equal(read.json.result.contents[0].text, "<p>view</p>");
+		assert.deepEqual(read.json.result.contents[0]._meta.ui.csp, { connectDomains: [], resourceDomains: [] }, "the view loads nothing from outside");
 		assert.equal((await rpc("resources/read", { uri: "ui://other" })).json.error.code, -32002);
 	});
 });

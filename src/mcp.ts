@@ -122,7 +122,8 @@ function fleetText(snap: Json): string {
 }
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
-const uiMeta = { ui: { resourceUri: FLEET_URI }, "openai/outputTemplate": FLEET_URI, "openai/widgetAccessible": true };
+// The shared MCP Apps contract; the openai/* keys are ChatGPT's older aliases, kept for older clients.
+const uiMeta = { ui: { resourceUri: FLEET_URI, visibility: ["model", "app"] }, "openai/outputTemplate": FLEET_URI, "openai/widgetAccessible": true };
 
 export const TOOLS = [
 	{
@@ -233,7 +234,7 @@ export function createMcpServer(options: McpOptions): Server {
 					break;
 				case "resources/read":
 					if (params.uri !== FLEET_URI) throw new RpcError(-32002, `unknown resource ${params.uri}`);
-					result = { contents: [{ uri: FLEET_URI, mimeType: UI_MIME, text: html(), _meta: { ui: { prefersBorder: true }, "openai/widgetDescription": "Live dashboard of the factory's sessions, loops and budget." } }] };
+					result = { contents: [{ uri: FLEET_URI, mimeType: UI_MIME, text: html(), _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } }, "openai/widgetDescription": "Live dashboard of the factory's sessions, loops and budget." } }] };
 					break;
 				default:
 					throw new RpcError(-32601, `method not found: ${message.method}`);
