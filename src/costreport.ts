@@ -37,7 +37,20 @@ export type Segment = {
 	maxShellResultChars?: number;
 	/** pr_tick results carrying model usage, grouped by PR number. */
 	paidReviewTicks?: Record<string, number>;
+	/** Turns and cost before the first change (a write, edit, commit, push or PR): what getting oriented cost. */
+	orientTurns: number;
+	orientCost: number;
+	changed: boolean;
 };
+
+const WRITE_TOOLS = new Set(["write", "edit", "git_push", "pr_create"]);
+const SHELL_WRITE = /sed -i|cat\s*>|\btee\b|git commit|apply_patch|>\s*[\w./-]+\.(ts|tsx|js|jsx|mjs|md|json|astro|css|html|py|dart|yml|yaml)\b/;
+/** Whether a tool call changes the repo, as far as the call itself shows. */
+export function isChange(name: string, args: unknown): boolean {
+	if (WRITE_TOOLS.has(name)) return true;
+	const command = args !== null && typeof args === "object" ? (args as Record<string, unknown>).command : undefined;
+	return name === "bash" && typeof command === "string" && SHELL_WRITE.test(command);
+}
 
 export type CostReport = {
 	segments: Segment[];
@@ -78,7 +91,7 @@ export function analyzeTranscript(entries: readonly TranscriptEntry[]): CostRepo
 	let prefixTokens: number | undefined;
 
 	const open = (loopId?: string, iteration?: number): Segment => {
-		current = { ...(loopId === undefined ? {} : { loopId }), ...(iteration === undefined ? {} : { iteration }), turns: 0, toolCalls: 0, startContext: 0, endContext: 0, tokens: zeroTokens(), cost: zeroMoney(), reingestCost: 0, models: {}, tools: {} };
+		current = { ...(loopId === undefined ? {} : { loopId }), ...(iteration === undefined ? {} : { iteration }), turns: 0, toolCalls: 0, startContext: 0, endContext: 0, tokens: zeroTokens(), cost: zeroMoney(), reingestCost: 0, models: {}, tools: {}, orientTurns: 0, orientCost: 0, changed: false };
 		firstTwo = [];
 		segments.push(current);
 		return current;
@@ -106,6 +119,11 @@ export function analyzeTranscript(entries: readonly TranscriptEntry[]): CostRepo
 			if (firstTwo.length < 2) {
 				firstTwo.push(num(usage?.cost?.input) + num(usage?.cost?.cacheWrite));
 				segment.reingestCost = firstTwo.reduce((a, b) => a + b, 0);
+			}
+			if (!segment.changed) {
+				segment.orientTurns++;
+				segment.orientCost += num(usage?.cost?.total);
+				if ((Array.isArray(message.content) ? (message.content as Block[]) : []).some((block) => block?.type === "toolCall" && typeof block.name === "string" && isChange(block.name, block.arguments))) segment.changed = true;
 			}
 			if (message.model !== undefined) segment.models[message.model] = (segment.models[message.model] ?? 0) + 1;
 			for (const block of Array.isArray(message.content) ? (message.content as Block[]) : []) {
@@ -180,6 +198,13 @@ export function findings(report: Pick<CostReport, "segments" | "prefixTokens" | 
 	if (report.startGrowth !== undefined && report.startGrowth > 2_000 && last !== undefined && last.startContext > 0) {
 		const perToken = last.reingestCost / last.startContext;
 		out.push(`The starting context grows by about ${count(report.startGrowth)} tokens per iteration, so the next iteration's re-read will cost about ${usd(perToken * (last.startContext + report.startGrowth))}.`);
+	}
+	const changing = loops.filter((segment) => segment.changed);
+	if (changing.length >= 3) {
+		const orient = changing.reduce((sum, segment) => sum + segment.orientCost, 0);
+		const total = changing.reduce((sum, segment) => sum + segment.cost.total, 0);
+		const turns = changing.reduce((sum, segment) => sum + segment.orientTurns, 0) / changing.length;
+		if (total > 0 && orient / total > 0.3) out.push(`Getting oriented took ${Math.round((100 * orient) / total)}% (${usd(orient)}) of the iterations that changed code, about ${turns.toFixed(1)} turns each before the first edit; repo_map and memory_search should replace exploratory reads.`);
 	}
 	const cacheWrite = report.totals.cost.cacheWrite;
 	if (report.totals.cost.total > 0 && cacheWrite / report.totals.cost.total > 0.3) {
