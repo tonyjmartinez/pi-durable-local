@@ -103,7 +103,10 @@ export type BudgetStatus = {
 	daySpend: number;
 	/** Loop charges alone over the same day, which age out on a known schedule. */
 	loopDaySpend: number;
+	/** Rolling-24h total reached the cap. Always false when pacing is on: the rate gate decides then. */
 	exceeded: boolean;
+	/** Average spend per day over the last 7 days (best effort: limited by how much history is kept). */
+	weekAvgPerDay: number;
 	/** Undefined when pacing is off or there is no cap. */
 	pace?: { windowHours: number; spent: number; allowance: number };
 };
@@ -125,7 +128,7 @@ export function budgetStatus(input: {
 		Math.max(dailySpend(loops, input.now, windowMs), latest === undefined ? 0 : totalSpendInWindow(input.samples, latest.total, input.now, since, windowMs));
 	const capped = Number.isFinite(input.capUsd) && input.capUsd > 0;
 	const daySpend = spentIn(DAY_MS);
-	const status: BudgetStatus = { capUsd: input.capUsd, daySpend, loopDaySpend: dailySpend(loops, input.now), exceeded: capped && daySpend >= input.capUsd };
+	const status: BudgetStatus = { capUsd: input.capUsd, daySpend, loopDaySpend: dailySpend(loops, input.now), exceeded: capped && !input.pace && daySpend >= input.capUsd, weekAvgPerDay: spentIn(7 * DAY_MS) / 7 };
 	if (input.pace && capped) {
 		const windowHours = Number.isFinite(input.paceWindowHours) && input.paceWindowHours! > 0 ? Math.min(input.paceWindowHours!, 24) : 3;
 		const burst = Number.isFinite(input.paceBurst) && input.paceBurst! > 0 ? input.paceBurst! : 2;

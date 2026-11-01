@@ -14,6 +14,8 @@ describe("sends respect the daily cap", () => {
 		assert.match(refusal!, /pd ask/);
 		assert.match(refusal!, /--force/);
 		assert.equal(ext.capRefusal({ capUsd: 10, daySpend: 4, exceeded: false }), undefined);
+		assert.equal(ext.capRefusal({ capUsd: 10, daySpend: 20, exceeded: false, pace: { windowHours: 3, spent: 0.2, allowance: 2.5 } }), undefined, "paced: the 24h total does not refuse");
+		assert.match(ext.capRefusal({ capUsd: 10, daySpend: 2, exceeded: false, pace: { windowHours: 3, spent: 2.6, allowance: 2.5 } })!, /spending rate/);
 	});
 
 	it("measures the cap the way the loops do, from loop charges and session-total samples", async () => {

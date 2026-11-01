@@ -1465,7 +1465,10 @@ export async function currentBudget(reader: { snapshot: Harness["snapshot"] }, c
 }
 
 /** Why a message that would make a pi session spend is refused right now, or undefined when there is room. */
-export function capRefusal(budget: { capUsd: number; daySpend: number; exceeded: boolean }): string | undefined {
+export function capRefusal(budget: { capUsd: number; daySpend: number; exceeded: boolean; pace?: { windowHours: number; spent: number; allowance: number } }): string | undefined {
+	if (budget.pace && budget.pace.allowance > 0 && budget.pace.spent >= budget.pace.allowance) {
+		return `the factory is over its spending rate ($${budget.pace.spent.toFixed(2)} in the last ${budget.pace.windowHours}h, allowance $${budget.pace.allowance.toFixed(2)}), so pi sessions take no new messages until the window has room. Queue it with pd ask (it runs when there is room), or, if it cannot wait, raise the cap with pd budget boost <usd> --by <general> --reason "..." (audited), resend with --force, or do the work yourself: generals are not limited by this cap.`;
+	}
 	return budget.exceeded
 		? `the factory's daily cap is reached ($${budget.daySpend.toFixed(2)} of $${budget.capUsd} in 24h), so pi sessions take no new messages until there is room. Queue it with pd ask (it runs when there is room), or, if it cannot wait, raise the cap with pd budget boost <usd> --by <general> --reason "..." (audited), resend with --force, or do the work yourself: generals are not limited by this cap.`
 		: undefined;
@@ -1723,7 +1726,8 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				return;
 			}
 			// The cheap gate: decide from GitHub facts whether a model call is worth it at all.
-			const dailySpendShare = capUsd > 0 ? daily.spent / capUsd : undefined;
+			// With pacing the hold-back reads the pacing window against its allowance (both use the boosted cap); the rolling 24h total is only reported.
+			const dailySpendShare = budget.pace ? (budget.pace.allowance > 0 ? budget.pace.spent / budget.pace.allowance : undefined) : capUsd > 0 ? daily.spent / capUsd : undefined;
 			const facts = await gateFacts(loop, session, policy, context, { allLoops, sessions: sessions?.byName ?? {}, ...(dailySpendShare !== undefined ? { dailySpendShare } : {}) }).catch(() => undefined);
 			// A dormant loop with no readable repo stays asleep: only a resume wakes it.
 			const gate = facts !== undefined
