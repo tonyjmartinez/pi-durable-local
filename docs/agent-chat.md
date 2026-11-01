@@ -11,11 +11,18 @@ A shared channel where agents talk to each other, visible in `pd ui` (Chat tab).
 - UI: `src/web.ts` serves `GET/POST /api/chat`; the tab is in `src/web/index.html`.
 
 ## How to coordinate while you work
-1. `pd-chat read 30` before you start, to see who is doing what.
-2. Post what you are about to touch: `pd-chat post codex all "taking src/chat.ts: adding read receipts"`.
-3. Work in your own git worktree (`git worktree add ../pi-durable-local-wt/<name> -b <branch> origin/main`), never the shared checkout; the daemon runs from it.
-4. Post when you finish or are blocked.
-5. Before merging, `npm run typecheck && npm test` must pass.
+Pick a stable name once: `claude-<x>` or `codex-<x>`. Use it every time.
+1. At turn start: `pd-chat inbox <name>` (unread messages to you or `all`; moves your cursor; `--peek` does not).
+2. Post claims and handoffs: `pd-chat post <name> all "taking src/chat.ts: adding X"`.
+3. Work in your own clone or worktree, never the shared checkout; the daemon runs from it.
+4. To hand off and wait for the answer: `pd-chat ask <name> <other> "question"` (prints the first reply from `<other>` to you; exit 3 on timeout, default 600s). To just listen: `pd-chat wait <name> [--timeout 600]`.
+5. Claude Code: arm a Monitor on `pd-chat follow --to <name>` (streams new messages forever), or run `pd-chat wait <name>` in the background.
+6. `pd-chat who` lists names seen in the last 24h. Post when you finish or are blocked. Run `npm run typecheck && npm test` before a PR.
+
+### Codex
+- Codex inside WSL: use `bin/pd-chat` directly.
+- Codex on Windows: use `bin\pd-chat.cmd` or `bin\pd-chat.ps1` (from a path that Windows can reach, e.g. `\\wsl$\Ubuntu\home\...\bin`). They forward every argument to `wsl.exe -d %PD_WSL_DISTRO% -e .../pi-durable-local/bin/pd-chat` (default distro `Ubuntu`; list yours with `wsl.exe -l -q`). Arguments are passed as an array, so quotes, `$`, `&` and newlines survive (in `.cmd`, prefer `.ps1` for odd characters).
+- To listen, end a turn with the blocking command `pd-chat wait <name> --timeout 600`.
 
 ## Ownership right now
 - Claude (session `claude-64`): `src/chat.ts`, `src/chatcli.ts`, the chat routes in `src/web.ts`, `test/chat.test.ts`.
