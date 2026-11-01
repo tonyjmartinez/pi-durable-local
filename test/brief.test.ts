@@ -26,12 +26,13 @@ describe("openParks", () => {
 });
 
 describe("budgetLine", () => {
-	it("shows the day against the cap, the pacing window and the queue", async () => {
+	it("leads with the rate when pacing, else the day against the cap", async () => {
 		const { budgetLine } = await import("../src/brief.ts");
 		assert.equal(
 			budgetLine({ capUsd: 10, daySpend: 7.5, exceeded: false, pace: { windowHours: 3, spent: 0.9, allowance: 1.25 }, running: 1, waiting: 3 }),
-			"BUDGET: $7.50 of $10 cap in 24h (75%); last 3h $0.90 of $1.25 pace; 1 running, 3 waiting for a turn",
+			"BUDGET: rate: last 3h $0.90 of $1.25 allowance; 24h total $7.50 (info, not a gate); 1 running, 3 waiting for a turn",
 		);
+		assert.match(budgetLine({ capUsd: 10, daySpend: 7.5, exceeded: false, weekAvgPerDay: 4.2, pace: { windowHours: 3, spent: 0.9, allowance: 1.25 }, running: 0, waiting: 0 }), /allowance, 7-day average \$4\.20\/day;/);
 		assert.match(budgetLine({ capUsd: 10, daySpend: 11, exceeded: true, running: 0, waiting: 0 }), /110%, waiting for room\); 0 running/);
 	});
 });

@@ -182,8 +182,8 @@ Each iteration orients to memory, Git status, open PRs, CI and prior notes, then
 Loops share a few slots. When a loop's gate says wake, it still waits for its turn:
 
 - At most `loops.maxConcurrent` iterations run at once.
-- With `loops.pace`, a loop waits while the last `paceWindowHours` (default 3) of pi spend is over `dailyBudgetUsd / 24 x paceWindowHours x paceBurst`, so the day's budget is spread across the day instead of being used up in a burst. A 3-hour window means one expensive iteration does not block the next hour.
-- A loop waiting on the daily cap looks again within the hour. `pd brief` opens with a BUDGET line: the 24h spend against the cap, the pacing window against its allowance, and how many loops are running or waiting.
+- With `loops.pace`, a loop waits while the last `paceWindowHours` (default 3) of pi spend is over `dailyBudgetUsd / 24 x paceWindowHours x paceBurst`, so the day's budget is spread across the day instead of being used up in a burst. A 3-hour window means one expensive iteration does not block the next hour. With pacing on, this rate is the only spend gate: the rolling 24h total is reported but never blocks loops or direct sends, so a burst yesterday does not hold today back. With pacing off, the old rule stands (loops wait while the rolling 24h total is at the cap). The maintenance hold-back below also reads the pacing window then.
+- A loop waiting on the daily cap looks again within the hour. `pd brief` opens with a BUDGET line: with pacing, the rate first (pacing window against its allowance, 7-day average per day), then the 24h total for information; without pacing, the 24h spend against the cap. It also shows how many loops are running or waiting.
 - Among waiting loops, the highest priority goes first (1 urgent .. 5 idle), then whoever has waited longest. A loop without its own priority gets one by kind: requests and budget-review 2, product and design 3, maintenance and business-review 4.
 
 Waiting costs no model call; the loop looks again every 10 minutes.
@@ -216,7 +216,7 @@ Before waking a model, the loop checks GitHub through the daemon's own `gh` (a h
 - A `friction-sweep` loop wakes only when the repo has open issues labelled `friction` that an agent may act on; issues labelled `needs-decision` or `friction-skipped` do not count.
 - A `code-quality` loop follows the cleanup rules, and also waits while another awake goal loop (the product loop) works on the same repo, so the two never edit the same files.
 - A `ci-health` loop wakes only when the base branch's newest run of a workflow failed, or a workflow failed in more than 20% of its last 10 runs (flaky). It remembers the CI state it last worked on, so the same red commit is not retried every hour.
-- Both maintenance kinds yield to product loops once today's spend passes 70% of `dailyBudgetUsd`. A red base branch is the exception.
+- Both maintenance kinds yield to product loops once today's spend passes 70% of `dailyBudgetUsd` (with `loops.pace`: once the pacing window has used 70% of its allowance). A red base branch is the exception.
 - A dormant loop wakes only when the repo's work fingerprint has changed since it went to sleep, checked every 6 hours.
 - If the gate cannot read the repo, the loop wakes anyway.
 
@@ -302,7 +302,7 @@ The allowlist is empty by default, which means nothing auto-merges anywhere: PRs
 | `automerge.requireChecks` | `true` | Need at least one passing GitHub Actions check |
 | `automerge.mergeMethod` | `squash` | `squash`, `merge`, or `rebase` |
 | `loops.defaultBudgetUsd` | `100` | Per-loop spend cap |
-| `loops.dailyBudgetUsd` | `1` | Shared cap on all pi sessions' spend in any 24 hours, inside loops or not (the daemon samples session totals every 5 min); loops wait when it is reached |
+| `loops.dailyBudgetUsd` | `1` | Daily budget for all pi sessions, inside loops or not (the daemon samples session totals every 5 min). Without `loops.pace` it is a rolling 24h cap and loops wait when it is reached; with `loops.pace` it is a rate (`/24` per hour) and the 24h total does not block |
 | `loops.maxConcurrent` | unset (no limit) | At most this many loop iterations run at once; the rest queue by priority |
 | `loops.pace` | `false` | Spread the daily cap over the day: wait while the pacing window spent more than its share |
 | `loops.paceWindowHours` | `3` | Hours the pacing allowance covers: `dailyBudgetUsd / 24 x hours x paceBurst` |

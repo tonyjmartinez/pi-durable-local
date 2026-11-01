@@ -174,6 +174,13 @@ describe("budgetStatus", () => {
 		assert.equal(b.daySpend, 5.5);
 		assert.equal(b.exceeded, false);
 		assert.deepEqual(b.pace, { windowHours: 3, spent: 1.5, allowance: 1.25 });
+		const burst = [{ id: "L1", spendLog: [{ at: now - 20 * h, usd: 12 }] }];
+		assert.equal(budgetStatus({ loops: burst, now, capUsd: 10 }).exceeded, true, "pacing off: the 24h total blocks");
+		const paced = budgetStatus({ loops: burst, now, capUsd: 10, pace: true });
+		assert.equal(paced.exceeded, false, "pacing on: yesterday's burst does not block");
+		assert.equal(paced.daySpend, 12, "still reported");
+		assert.equal(paced.pace!.spent, 0);
+		assert.equal(paced.weekAvgPerDay, 12 / 7);
 		const since = budgetStatus({ loops, now, capUsd: 10, since: now - 3 * h });
 		assert.equal(since.daySpend, 1.5, "charges before `since` are not counted");
 		assert.equal(since.pace, undefined, "no pacing unless asked");
