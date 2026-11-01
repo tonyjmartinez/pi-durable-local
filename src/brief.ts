@@ -25,7 +25,7 @@ export type BriefInput = {
 	/** The personal assistant's latest agenda for Tony (memory topic owner-agenda). */
 	agenda?: { text: string; by: string; updatedAt: number };
 	/** The factory budget (see budgetStatus) plus the loop queue's counts. */
-	budget?: { capUsd: number; daySpend: number; exceeded: boolean; pace?: { windowHours: number; spent: number; allowance: number }; running: number; waiting: number; boosts?: Boost[] };
+	budget?: { capUsd: number; daySpend: number; exceeded: boolean; weekAvgPerDay?: number; pace?: { windowHours: number; spent: number; allowance: number }; running: number; waiting: number; boosts?: Boost[] };
 };
 
 export type ParkedPr = { key: string; repo: string; pr: number; sha: string; reason: string; review?: string; at: string };
@@ -63,9 +63,13 @@ const clip = (text: string, length: number) => (text.length <= length ? text : `
 /** One line: the rolling day against the cap, the pacing window against its allowance, and the queue. */
 export function budgetLine(b: NonNullable<BriefInput["budget"]>): string {
 	const day = b.capUsd > 0 ? `$${b.daySpend.toFixed(2)} of $${b.capUsd} cap in 24h (${Math.round((b.daySpend / b.capUsd) * 100)}%${b.exceeded ? ", waiting for room" : ""})` : `$${b.daySpend.toFixed(2)} in 24h, no cap`;
-	const pace = b.pace ? `; last ${b.pace.windowHours}h $${b.pace.spent.toFixed(2)} of $${b.pace.allowance.toFixed(2)} pace` : "";
 	const boosts = b.boosts?.length ? `; boosted: ${b.boosts.map(describeBoost).join(", ")}` : "";
-	return `BUDGET: ${day}${pace}; ${b.running} running, ${b.waiting} waiting for a turn${boosts}`;
+	if (b.pace) {
+		const week = b.weekAvgPerDay !== undefined ? `, 7-day average $${b.weekAvgPerDay.toFixed(2)}/day` : "";
+		const rate = `rate: last ${b.pace.windowHours}h $${b.pace.spent.toFixed(2)} of $${b.pace.allowance.toFixed(2)} allowance${week}`;
+		return `BUDGET: ${rate}; 24h total $${b.daySpend.toFixed(2)} (info, not a gate); ${b.running} running, ${b.waiting} waiting for a turn${boosts}`;
+	}
+	return `BUDGET: ${day}; ${b.running} running, ${b.waiting} waiting for a turn${boosts}`;
 }
 
 export function buildBrief(input: BriefInput): string {

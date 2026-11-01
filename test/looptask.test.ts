@@ -843,11 +843,12 @@ describe("fresh context per iteration", () => {
 		assert.equal(iterationAudit().length, 0);
 	});
 
-	it("does not reset after another session has written since the last tick", async () => {
+	it("resets after another session has written since the last tick, carrying its note", async () => {
 		setup({ remote: null });
-		recentEntries = [entry("pdl.peer"), entry("pdl.loop-tick")];
+		recentEntries = [{ kind: "pdl.peer", data: { from: "assistant", text: "please nudge" } } as never, entry("pdl.loop-tick")];
 		await run();
-		assert.equal(resets.length, 0);
+		assert.equal(resets.length, 1);
+		assert.match(String(resets[0]), /assistant: please nudge/);
 		assert.equal(submits.length, 1);
 	});
 
@@ -1312,5 +1313,27 @@ describe("loop prompt delegation", () => {
 		assert.match(prompt, /Hand mechanical work \(.*screenshots.*\) to the fast subagent/);
 		assert.match(prompt, /keep judgment, planning and shipping yourself/);
 		assert.match(prompt, /use the fast subagent for bounded research and mechanical work/);
+	});
+});
+
+describe("resetDecision", () => {
+	const e = (kind: string, data?: unknown) => ({ kind, data });
+	it("resets after a peer note and carries it into the handoff", () => {
+		const d = ext.resetDecision([e("pi.assistant"), e("pdl.peer", { from: "budget-review", text: "be cheaper" }), e("pi.assistant"), e("pdl.loop-tick")], true);
+		assert.equal(d.reset, true);
+		assert.deepEqual(d.carried, ["budget-review: be cheaper"]);
+		assert.match(ext.loopHandoff({ id: "L1", goal: "g" } as never, [], d.carried), /budget-review: be cheaper/);
+	});
+	it("keeps the context when a person wrote, even behind a peer note", () => {
+		assert.equal(ext.resetDecision([e("pdl.peer", { from: "x", text: "y" }), e("pi.user"), e("pdl.loop-tick")], true).reset, false);
+	});
+	it("keeps the context when the scan was unsettled, and says why", () => {
+		const d = ext.resetDecision([e("pi.assistant")], false);
+		assert.equal(d.reset, false);
+		assert.match(d.reason, /unsettled/);
+	});
+	it("resets a conversation nobody spoke in, and one whose newest input is the tick", () => {
+		assert.equal(ext.resetDecision([], true).reset, true);
+		assert.equal(ext.resetDecision([e("pi.assistant"), e("pdl.loop-tick")], true).reset, true);
 	});
 });
