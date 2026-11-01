@@ -45,14 +45,28 @@ Findings from codex-context (official docs, 2026-11-01):
 
 pd-mcp therefore accepts its token either as `Authorization: Bearer` or as the last URL segment (`/mcp/<64-hex>`). The secret URL is what lets ChatGPT and Claude connect in "no auth" mode during the read-only phases, since a secret URL is a capability. It is **not** acceptable for write tools: phase 3 requires OAuth in front of pd-mcp first.
 
-Exposure choices (owner approval needed; nothing is exposed today):
-1. **Cloudflare Tunnel** (`cloudflared`, outbound only) to a hostname on Tony's Cloudflare account, routing `/mcp/*` only. Works for both hosts. Recommended.
-2. **OpenAI Secure MCP Tunnel**: ChatGPT only, and availability depends on the plan (being checked).
+Exposure (Tony chose this 2026-11-01): **Workers VPC**. His Cloudflare account has no zone, so a tunnel has no public hostname; instead a Worker on workers.dev reaches the tunnel privately:
+
+```
+https://pd.ajosephmartinez.workers.dev/mcp/<token>
+  → Worker `pd` (deploy/pd-console)       only /mcp with a 64-hex token, POST only, 256 KB cap
+  → VPC service `pd-mcp`                  http 127.0.0.1:7787 through the tunnel
+  → tunnel `pd-console` (cloudflared, outbound only, run by bin/pd-console-up)
+  → pd-mcp                                checks the token itself
+```
+
+Setup, done once by a general with `CLOUDFLARE_API_TOKEN` from `~/.config/pi-durable/env`. The token needs Account › Cloudflare Tunnel: Edit, Account › Connectivity Directory: Admin, and Account › Workers Scripts: Edit.
+1. Create the tunnel: `POST /accounts/<id>/cfd_tunnel {"name":"pd-console","config_src":"cloudflare"}`. Then save `GET …/cfd_tunnel/<tid>/token` to `~/.config/pi-durable/tunnel-token` (mode 600).
+2. Create the VPC service: `npx wrangler vpc service create pd-mcp --type http --tunnel-id <tid> --ipv4 127.0.0.1 --http-port 7787`. Put its id in `deploy/pd-console/wrangler.jsonc` (it is not a secret).
+3. Deploy the Worker: `npx wrangler deploy -c deploy/pd-console/wrangler.jsonc`.
+4. Run `bin/pd-console-up`, and add it to `~/.profile` next to `pdd-up` so it starts on login.
+
+When the machine is asleep, the Worker answers 503 "the factory is offline". OpenAI's Secure MCP Tunnel was the alternative; it covers ChatGPT only.
 
 ## Phases and gates
 
 1. **Read-only server (this PR).** Gate: tests pass, plus a live smoke test against pdd (initialize, tools/list, fleet_status, factory_brief, resources/read) and a screenshot of the view in light and dark. ✅
-2. **Exposure.** Run the tunnel as a user service next to pdd (`pdd-up` starts pd-mcp as well). Add the connector in ChatGPT developer mode and as a Claude custom connector. Gate: the dashboard renders in both hosts on desktop *and* phone, refresh works, and a wrong token gets 401.
+2. **Exposure.** Workers VPC, set up as above; `bin/pd-console-up` supervises pd-mcp and the tunnel. Add the connector in ChatGPT developer mode and as a Claude custom connector. Gate: the dashboard renders in both hosts on desktop *and* phone, refresh works, and a wrong token gets 401.
 3. **OAuth and one control.** Put an OAuth front in place (Cloudflare Access for SaaS acting as the OAuth provider, or a minimal built-in authorization server). Add `loop_pause`/`loop_resume` with an operation id, audit (`by: chat-console`) and receipts. Gate: pause and resume round-trip from the phone, the audit shows it, and a replayed operation id is a no-op.
 4. **Steering.** Queued sends, bulk actions with partial-failure receipts, and messages to generals. Gate: a capped budget refuses or queues exactly as `pd send` does; bulk pause of N loops reports N receipts.
 

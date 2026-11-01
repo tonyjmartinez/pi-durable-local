@@ -1,0 +1,10 @@
+// Deployed by a general with: npx wrangler deploy -c deploy/pd-console/wrangler.jsonc
+// service_id comes from `wrangler vpc service create pd-mcp --type http --tunnel-id <id> --ipv4 127.0.0.1 --http-port 7787`.
+{
+	"name": "pd",
+	"main": "index.js",
+	"compatibility_date": "2026-10-31",
+	"workers_dev": true,
+	"preview_urls": false,
+	"vpc_services": [{ "binding": "PD", "service_id": "__SERVICE_ID__" }]
+}

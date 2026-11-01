@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Start pd-mcp and its Cloudflare Tunnel connector under restart loops (like pdd-up), unless already running.
+# `pd-console-up stop` stops both. The tunnel token lives in ~/.config/pi-durable/tunnel-token (mode 600).
+set -euo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+DATA="${PD_DATA_DIR:-$HOME/.local/share/pi-durable}"
+CONFIG="${PD_CONFIG_DIR:-$HOME/.config/pi-durable}"
+LOG="$DATA/pd-console.log"
+NODE="$(command -v node || echo "$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | tail -1)/bin/node")"
+export PATH="$HOME/.local/bin:$PATH"
+umask 077
+mkdir -p "$DATA"
+
+supervisors() { pgrep -f -- "pd-console-supervisor ${LOG} " || true; }
+
+if [[ "${1:-}" == "stop" ]]; then
+	found=0
+	for pid in $(supervisors); do kill -TERM -- "-$pid" 2>/dev/null && found=1 || true; done
+	[[ $found == 1 ]] && echo "pd-console stopped" || echo "pd-console was not running"
+	exit 0
+fi
+if [[ -n "$(supervisors)" ]]; then echo "pd-console already running"; exit 0; fi
+
+TOKEN_FILE="$CONFIG/tunnel-token"
+CLOUDFLARED="$(command -v cloudflared || true)"
+start() { # name, command...
+	local name="$1"; shift
+	setsid bash -c '
+		log="$1"; name="$2"; shift 2
+		child=
+		trap '"'"'[[ -n "$child" ]] && kill -TERM "$child" 2>/dev/null; exit 0'"'"' TERM INT
+		while true; do
+			"$@" >>"$log" 2>&1 &
+			child=$!
+			wait "$child" || true
+			echo "$(date -Is) $name exited; restarting in 5s" >>"$log"
+			child=
+			sleep 5 & wait $! || true
+		done
+	' pd-console-supervisor "$LOG" "$name" "$@" </dev/null >/dev/null 2>&1 &
+	echo "started $name (log $LOG)"
+}
+
+cd "$ROOT"
+start pd-mcp "$NODE" --no-warnings src/mcp.ts
+if [[ -n "$CLOUDFLARED" && -s "$TOKEN_FILE" ]]; then
+	start tunnel "$CLOUDFLARED" tunnel --no-autoupdate run --token-file "$TOKEN_FILE"
+else
+	echo "tunnel not started: need cloudflared on PATH and $TOKEN_FILE (see docs/chat-console.md)"
+fi
