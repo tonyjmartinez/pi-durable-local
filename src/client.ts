@@ -344,7 +344,8 @@ const HELP = `pd — pi-durable sessions that keep running
   pd brief                                  for generals: what needs a decision, then the workforce
   pd new <name> --cwd <dir> [--purpose "…"] [--model provider/id]
   pd attach <name>                          live view + chat (Ctrl-C detaches; agent keeps going)
-  pd send <name> "message" [--steer]        fire and forget
+  pd send <name> "message" [--steer] [--force] [--from me]
+                                            fire and forget; refused while the daily cap is reached unless --force
   pd rm <name>                              remove a session (its history stays in the store)
   pd ui [--rotate]                          local web UI on 127.0.0.1:7777 (PD_UI_PORT); prints a login link
   pd tmux [names…]                          tmux session "pd": status window + one per session
@@ -434,7 +435,7 @@ async function main(argv: string[]): Promise<void> {
 		case "a":
 			return attach(positional[0] ?? "");
 		case "send":
-			await call("POST", `/sessions/${positional[0]}/send`, { text: positional.slice(1).join(" "), mode: opts.steer ? "steer" : "followUp" });
+			await call("POST", `/sessions/${positional[0]}/send`, { text: positional.slice(1).join(" "), mode: opts.steer ? "steer" : "followUp", ...(opts.force ? { force: true } : {}), ...(typeof opts.from === "string" ? { from: opts.from } : {}) });
 			console.log("sent");
 			return;
 		case "rm":

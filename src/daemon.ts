@@ -25,7 +25,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
-import { dryRunGates, sampleFactorySpend, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
+import { dryRunGates, sampleFactorySpend, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_, capRefusal, currentBudget } from "./extensions.ts";
 import {
 	applyLoopSettings,
 	applyResume,
@@ -341,7 +341,14 @@ const routes: [string, RegExp, Route][] = [
 	["POST", /^\/sessions\/([^/]+)\/send$/, async (m, body) => {
 		const { conversation } = await sessionByName(m[1]!);
 		const mode = sendMode(body);
+		// Direct sends spend outside any loop, so they respect the daily cap too unless forced.
+		const refusal = capRefusal(await currentBudget(harness, context));
+		if (refusal !== undefined && body.force !== true) {
+			audit("send_refused", { session: m[1], reason: "daily cap" });
+			throw new HttpError(429, `not sent: ${refusal}`);
+		}
 		const submission = await conversation.submit({ type: "input", content: String(body.text ?? ""), whenBusy: mode }, context);
+		audit("sent", { session: m[1], chars: String(body.text ?? "").length, ...(body.force === true ? { forced: true } : {}), ...(typeof body.from === "string" ? { from: body.from } : {}) });
 		return { submission: submission.id };
 	}],
 	["POST", /^\/sessions\/([^/]+)\/abort$/, async (m) => {
