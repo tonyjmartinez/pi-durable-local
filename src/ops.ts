@@ -131,6 +131,13 @@ export function assertNoTwin(loops: Iterable<Pick<Loop, "id" | "session" | "kind
 	if (twin) throw new HttpError(409, `loop ${twin.id} is already a ${kind} loop on ${session}; resume or stop it instead`);
 }
 
+/** Resuming must not bring back a loop that another live loop of the same kind replaced on its session. */
+export function assertNoTwinOnResume(loops: Iterable<Pick<Loop, "id" | "session" | "kind" | "status">>, loop: Pick<Loop, "id" | "session" | "kind">): void {
+	if (loop.kind === undefined) return;
+	const twin = [...loops].find((other) => other.id !== loop.id && other.session === loop.session && other.kind === loop.kind && other.status === "active");
+	if (twin) throw new HttpError(409, `loop ${twin.id} is already the live ${loop.kind} loop on ${loop.session}; stop it first to resume ${loop.id}`);
+}
+
 /** A new loop record. The caller creates its task and stores it. */
 export function newLoop(input: { id: string; session: string; spec: LoopSpec; defaults: LoopDefaults; costAtStart: number; now: number }): Loop {
 	const { spec, defaults } = input;

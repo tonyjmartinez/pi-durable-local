@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { CLEANUP_PROMPTS, CLEANUP_SCHEDULE } from "../src/loopgate.ts";
 import {
-	applyLoopSettings, applyResume, assertApprovedHead, assertNoTwin, assertResumable, auditTail, cloneArgs, cloneEnv, editProjectPolicy, endLiveTask,
+	applyLoopSettings, applyResume, assertApprovedHead, assertNoTwin, assertNoTwinOnResume, assertResumable, auditTail, cloneArgs, cloneEnv, editProjectPolicy, endLiveTask,
 	HttpError, LOOP_LIMITS, newLoop, newMemory, parseApproval, parseRepo, projectDir, projectSessionName, resolveLoopSpec, sendMode,
 	stopPatch, updateProjectPolicy, validateSessionName,
 } from "../src/ops.ts";
@@ -319,6 +319,26 @@ describe("assertNoTwin", () => {
 		const design = resolveLoopSpec({ preset: "design-polish" });
 		assert.doesNotThrow(() => assertNoTwin([{ id: "L5", session: "s", kind: "goal", status: "active" }], "s", design));
 		assert.equal(status(() => assertNoTwin([{ id: "L6", session: "s", kind: "design", status: "active" }], "s", design)), 409);
+	});
+});
+
+describe("assertNoTwinOnResume", () => {
+	it("refuses to resume a loop that a live loop of the same kind replaced on its session", () => {
+		const loops = [{ id: "L32", session: "s", kind: "design" as const, status: "done" as const }, { id: "L41", session: "s", kind: "design" as const, status: "active" as const }];
+		assert.equal(status(() => assertNoTwinOnResume(loops, loops[0]!)), 409);
+		assert.throws(() => assertNoTwinOnResume(loops, loops[0]!), /L41 is already the live design loop on s; stop it first to resume L32/);
+	});
+
+	it("allows a resume beside another kind, another session, a paused twin, or itself", () => {
+		const me = { id: "L33", session: "s", kind: "goal" as const };
+		const loops = [
+			{ ...me, status: "active" as const },
+			{ id: "L41", session: "s", kind: "design" as const, status: "active" as const },
+			{ id: "L50", session: "t", kind: "goal" as const, status: "active" as const },
+			{ id: "L51", session: "s", kind: "goal" as const, status: "paused" as const },
+		];
+		assert.doesNotThrow(() => assertNoTwinOnResume(loops, me));
+		assert.doesNotThrow(() => assertNoTwinOnResume(loops, { id: "L9", session: "s", kind: undefined }));
 	});
 });
 

@@ -29,6 +29,7 @@ import {
 	applyResume,
 	assertApprovedHead,
 	assertNoTwin,
+	assertNoTwinOnResume,
 	assertResumable,
 	auditTail,
 	cloneArgs,
@@ -241,6 +242,7 @@ async function setLoopStatus(id: string, action: string) {
 		await endLiveTask(harness, loop.taskId, context, { wait: false });
 	} else if (action === "resume") {
 		assertResumable(loop);
+		assertNoTwinOnResume(Object.values((await harness.snapshot(Loops, context))?.byId ?? {}), loop);
 		const { conversation } = await sessionByName(loop.session);
 		// A loop paused by its own report may still have a live task waiting to notice; end it so only one runs.
 		await endLiveTask(harness, loop.taskId, context, { wait: true });
