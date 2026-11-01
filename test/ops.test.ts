@@ -591,3 +591,25 @@ describe("updateProjectPolicy", () => {
 		assert.equal(readFileSync(file, "utf8"), "{ not json");
 	});
 });
+
+describe("worktreeCwdProblem", () => {
+	it("refuses a worktree .git file, allows clones and plain dirs", async () => {
+		const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const { worktreeCwdProblem } = await import("../src/ops.ts");
+		const root = mkdtempSync(join(tmpdir(), "pd-wt-"));
+		const wt = join(root, "wt");
+		mkdirSync(wt);
+		writeFileSync(join(wt, ".git"), `gitdir: ${root}/main/.git/worktrees/wt\n`);
+		assert.match(worktreeCwdProblem(wt) ?? "", /standalone `git clone`/);
+		const clone = join(root, "clone");
+		mkdirSync(join(clone, ".git"), { recursive: true });
+		assert.equal(worktreeCwdProblem(clone), undefined);
+		assert.equal(worktreeCwdProblem(root), undefined);
+		const sub = join(root, "sub");
+		mkdirSync(sub);
+		writeFileSync(join(sub, ".git"), "gitdir: .git-real\n");
+		assert.equal(worktreeCwdProblem(sub), undefined);
+	});
+});

@@ -2,7 +2,7 @@
 // operations that touch tasks or files through an injected interface. Importing this starts nothing, so every piece
 // can be tested without opening the store or a socket.
 import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { LOOP_PROMPTS, LOOP_SCHEDULE, type LoopPreset } from "./loopgate.ts";
 import type { Loop, Memory } from "./state.ts";
 
@@ -263,4 +263,19 @@ export function updateProjectPolicy(file: string, change: { repo: string; baseBr
 	const { policy, mergeEnabled } = editProjectPolicy(JSON.parse(readFileSync(file, "utf8")) as PolicyJson, change);
 	writeFileSync(file, `${JSON.stringify(policy, null, "\t")}\n`);
 	return { mergeEnabled };
+}
+
+/** Error text when `cwd` is a git worktree (`.git` is a file whose gitdir lies outside it), else undefined. Fixes #23. */
+export function worktreeCwdProblem(cwd: string): string | undefined {
+	const dotGit = join(cwd, ".git");
+	try {
+		if (!statSync(dotGit).isFile()) return undefined;
+		const match = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"));
+		if (!match?.[1]) return undefined;
+		const gitdir = resolve(cwd, match[1].trim());
+		if (gitdir === resolve(cwd) || gitdir.startsWith(`${resolve(cwd)}/`)) return undefined;
+		return `${cwd} is a git worktree (its .git points to ${gitdir}). The sandbox makes only the cwd writable, so the session could not branch or commit there. Use a standalone \`git clone\` instead.`;
+	} catch {
+		return undefined;
+	}
 }
