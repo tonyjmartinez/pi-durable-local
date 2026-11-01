@@ -1,7 +1,7 @@
 // The daemon's request handling, minus the daemon: validation, defaults and edits as pure functions, and the few
 // operations that touch tasks or files through an injected interface. Importing this starts nothing, so every piece
 // can be tested without opening the store or a socket.
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { LOOP_PROMPTS, LOOP_SCHEDULE, type LoopPreset } from "./loopgate.ts";
 import { parsePriority, type Priority, requestGoal } from "./queue.ts";
@@ -52,9 +52,23 @@ export function newMemory(body: Record<string, unknown>, id: string, now: number
 export function auditTail(file: string, count: number, maxBytes = 512 * 1024): unknown[] {
 	// slice(-0) would be the whole array.
 	if (!(count > 0)) return [];
-	const size = statSync(file).size;
-	const start = Math.max(0, size - maxBytes);
-	const text = readFileSync(file).subarray(start).toString("utf8");
+	const fd = openSync(file, "r");
+	let start: number;
+	let text: string;
+	try {
+		const size = fstatSync(fd).size;
+		start = Math.max(0, size - maxBytes);
+		const buffer = Buffer.alloc(size - start);
+		let read = 0;
+		while (read < buffer.length) {
+			const bytes = readSync(fd, buffer, read, buffer.length - read, start + read);
+			if (bytes === 0) break; // The log may have been truncated since fstat.
+			read += bytes;
+		}
+		text = buffer.subarray(0, read).toString("utf8");
+	} finally {
+		closeSync(fd);
+	}
 	// Starting mid-file means the first line is probably cut in two: drop it.
 	return text.split("\n").slice(start > 0 ? 1 : 0).filter(Boolean).slice(-count).flatMap((line) => {
 		try {

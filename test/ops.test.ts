@@ -1,9 +1,11 @@
 // The daemon's request handling, tested without the daemon: validation, defaults, edits, and the task-ending guard.
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { CLEANUP_PROMPTS, CLEANUP_SCHEDULE } from "../src/loopgate.ts";
 import {
 	applyLoopSettings, applyResume, assertApprovedHead, assertNoTwin, assertNoTwinOnResume, assertResumable, auditTail, cloneArgs, cloneEnv, editProjectPolicy, endLiveTask,
@@ -108,6 +110,40 @@ describe("auditTail", () => {
 		assert.equal(tail.at(-1)!.n, 499);
 		assert.deepEqual(tail.map((entry) => entry.n), tail.map((_, i) => tail[0]!.n + i), "a contiguous run of whole entries");
 		assert.ok(tail[0]!.n > 400);
+	});
+
+	it("bounds physical reads and closes the descriptor even on read failure", () => {
+		const file = write("bounded.jsonl", `${"x".repeat(2 * 1024 * 1024)}\n${lines(5).join("\n")}\n`);
+		const originalRead = fs.readSync;
+		const originalReadFile = fs.readFileSync;
+		const originalClose = fs.closeSync;
+		let requested = 0;
+		let closed = 0;
+		let fail = false;
+		const reads = mock.method(fs, "readSync", (...args: unknown[]) => {
+			if (fail) throw new Error("read failed");
+			requested += Number(args[3]);
+			return Reflect.apply(originalRead, fs, args);
+		});
+		const whole = mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+			assert.notEqual(args[0], file, "must not load the entire log");
+			return Reflect.apply(originalReadFile, fs, args);
+		});
+		const closes = mock.method(fs, "closeSync", (fd: number) => { closed++; return originalClose(fd); });
+		syncBuiltinESMExports();
+		try {
+			assert.deepEqual(auditTail(file, 2, 128), [{ n: 3 }, { n: 4 }]);
+			assert.ok(requested <= 128, `requested ${requested} bytes`);
+			assert.equal(closed, 1);
+			fail = true;
+			assert.throws(() => auditTail(file, 2, 128), /read failed/);
+			assert.equal(closed, 2);
+		} finally {
+			reads.mock.restore();
+			whole.mock.restore();
+			closes.mock.restore();
+			syncBuiltinESMExports();
+		}
 	});
 
 	it("does not choke on a multi-byte character cut by the window", () => {
