@@ -24,6 +24,7 @@ import {
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
+import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
 import { dryRunGates, sampleFactorySpend, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_, capRefusal, currentBudget } from "./extensions.ts";
 import {
@@ -84,7 +85,7 @@ models.setProvider(anthropicProvider());
 
 const registry = createRegistry();
 // Guard first, so its hook sees every call before anything else can act on it.
-for (const extension of [Guard_, createCodingTools(), SessionContext, Memory_, Sessions_, Web_, Git_, Loops_, Subagent_]) {
+for (const extension of [Guard_, createCodingTools(), createToolSearchExtension(), SessionContext, Memory_, Sessions_, Web_, Git_, Loops_, Subagent_]) {
 	registry.install(extension);
 }
 
