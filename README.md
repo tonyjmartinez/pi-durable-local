@@ -59,7 +59,7 @@ pd ui [--rotate]                          local web UI on 127.0.0.1:7777 (PD_UI_
 pd tmux [names...]                        tmux session "pd": status window plus one window per session
 
 pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
-pd loop start <session> --preset product-gardener|design-polish|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep|code-quality|ci-health|devils-advocate
+pd loop start <session> --preset product-gardener|design-polish|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep|code-quality|ci-health|devils-advocate|budget-review
 pd loop ls | pause <id> | resume <id> | stop <id>
 pd loop set <id> [--every 30] [--max 17520] [--budget 100]
 
@@ -217,6 +217,8 @@ Before waking a model, the loop checks GitHub through the daemon's own `gh` (a h
 | `ci-health` | ci-health | hourly check | fixes a red base branch or a flaky test at its cause; $5 budget |
 | `devils-advocate` | devils-advocate | every 6 hours | opens no PRs: a deliberately rude sceptic that rotates through the factory's process (gates, spend, loops, prompts, guardrails, coordination, docs, outcomes), reads a redacted digest of loops, audit log and chat with `factory_evidence`, and files at most two evidence-backed `friction` findings per run; $3 budget, yields to product loops like maintenance |
 
+| `budget-review` | budget-review | every 4 hours | opens no PRs: reads the last 24h of pi spend (inside and outside loops, by loop) from `factory_evidence`, judges output per dollar, files at most two `Budget: ` findings (needs-decision) or sends one short efficiency note to a session, and keeps a spend ledger in memory; never dormant and not held back near the cap; $5 budget |
+
 Run the devil's advocate on a session whose repo is the factory itself (a clone of pi-durable-local) so its findings land where they can be fixed: `pd loop start <session> --preset devils-advocate`. Its findings are titled `Devil's advocate: ...`; the tone is blunt by design, but it may not insult people and must quote evidence.
 
 The `ci-health` loop cannot change CI configuration: `.github/` and test-runner configs are protected, and pushes touching `.github/` are refused. GitHub runs a workflow from a pushed branch, with the repo's secrets, before anyone reviews it. When a fix really is a CI change, the agent writes a proposal to `docs/proposed-ci/` for a human.
@@ -278,7 +280,8 @@ The allowlist is empty by default, which means nothing auto-merges anywhere: PRs
 | `automerge.requireChecks` | `true` | Need at least one passing GitHub Actions check |
 | `automerge.mergeMethod` | `squash` | `squash`, `merge`, or `rebase` |
 | `loops.defaultBudgetUsd` | `100` | Per-loop spend cap |
-| `loops.dailyBudgetUsd` | `1` | Shared spend cap across all loops in any 24 hours |
+| `loops.dailyBudgetUsd` | `1` | Shared cap on all pi sessions' spend in any 24 hours, inside loops or not (the daemon samples session totals every 5 min); loops wait when it is reached |
+| `loops.maintenanceModel` | unset | Model for friction-sweep, ci-health, code-quality and cleanup iterations (e.g. Haiku); the session's model is restored after |
 | `loops.defaultIntervalMinutes` | `30` | Time between iterations (half an hour) |
 | `loops.defaultMaxIterations` | `17520` | Iteration cap (one year at the default cadence) |
 

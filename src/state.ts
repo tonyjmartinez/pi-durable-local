@@ -74,7 +74,7 @@ export type Loop = {
 	/** Time-stamped charges (last two days), for the factory-wide daily budget. */
 	spendLog?: { at: number; usd: number }[];
 	/** How the loop gate decides to wake it; see LoopKind in loopgate.ts. Default goal. */
-	kind?: "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate";
+	kind?: "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review";
 	/** ci-health: the CI finding the last completed iteration was woken for. */
 	lastCiKey?: string;
 	skipIfIdleHours?: number;
@@ -92,7 +92,12 @@ export type Loop = {
 	idleReported?: boolean;
 };
 
-export const Loops = defineDoc<{ byId: Record<string, Loop>; nextId: number }>({
+export const Loops = defineDoc<{
+	byId: Record<string, Loop>;
+	nextId: number;
+	/** Samples of every session's total cost (last two days), so the daily cap counts spend outside loops too. */
+	factorySpend?: { at: number; total: number }[];
+}>({
 	kind: "pdl.loops",
 	version: 1,
 	scope: "session",

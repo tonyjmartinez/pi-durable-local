@@ -48,6 +48,8 @@ export type Policy = {
 		freshContext: boolean;
 		/** Cap on all loops' spend together in any 24 hours, in USD; loops wait for room when it is reached. 0 = no cap. */
 		dailyBudgetUsd: number;
+		/** Model for routine maintenance loops (friction-sweep, ci-health, code-quality, cleanup). Unset = session model. */
+		maintenanceModel?: string;
 		/** Optional one-time budget start in epoch milliseconds; historical spend remains recorded. */
 		dailyBudgetSince?: number;
 		/** Hard cap on spend per loop, in USD; the loop pauses when crossed. */

@@ -46,6 +46,7 @@ let entriesCalls: number;
 let order: string[];
 /** What a reset does to the session's measured cost (a reset itself can cost a little). */
 let resetAddsCost: number;
+let currentModel = "anthropic/claude-sonnet-5-5";
 
 const cost = (total: number) => ({ models: { m: { cost: { total } } }, tools: {} });
 const context = {} as never;
@@ -98,6 +99,7 @@ beforeEach(() => {
 	entriesCalls = 0;
 	order = [];
 	resetAddsCost = 0;
+	currentModel = "anthropic/claude-sonnet-5-5";
 	writeFileSync(AUDIT, "");
 	writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), "{}");
 	gh.script([]);
@@ -116,6 +118,11 @@ beforeEach(() => {
 							order.push("reset");
 							resets.push(handoff);
 							usage[1] = cost(((usage[1] as { models: { m: { cost: { total: number } } } })?.models?.m?.cost?.total ?? 0) + resetAddsCost);
+						},
+						agent: async () => ({ model: { provider: currentModel.split("/")[0], modelId: currentModel.split("/").slice(1).join("/") } }),
+						configure: async (change: { model: { provider: string; modelId: string } }) => {
+							order.push("configure");
+							currentModel = `${change.model.provider}/${change.model.modelId}`;
 						},
 						submit: async (input: { requestId: string; content: string; entry: { kind: string; data: Record<string, unknown> } }) => {
 							order.push("submit");
@@ -1133,5 +1140,49 @@ describe("loop_report", () => {
 		const result = await report({ loopId: "L1", status: "continue", note: "x" }, api(), context);
 		assert.equal(result.isError, true);
 		assert.deepEqual(created, []);
+	});
+});
+
+describe("the daily cap counts spend outside loops", () => {
+	it("waits when sessions spent the day's budget through direct sends, with no loop charges at all", async () => {
+		setPolicy({ dailyBudgetUsd: 10 });
+		const now = Date.now();
+		store.seed(Loops, { byId: { L1: baseLoop() }, nextId: 2, factorySpend: [{ at: now - 23 * 60 * 60_000, total: 5 }, { at: now - 60_000, total: 16 }] });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.equal(submits.length, 0, "no model call over the cap");
+		assert.equal(loopDoc()!.note, "waiting: factory daily budget reached");
+	});
+
+	it("runs when the day's change in session totals is under the cap", async () => {
+		setPolicy({ dailyBudgetUsd: 10 });
+		const now = Date.now();
+		store.seed(Loops, { byId: { L1: baseLoop() }, nextId: 2, factorySpend: [{ at: now - 25 * 60 * 60_000, total: 5 }, { at: now - 60_000, total: 14 }] });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:0"]);
+	});
+});
+
+describe("maintenance loops on the cheaper model", () => {
+	it("switches a ci-health iteration to the maintenance model and restores the session's model after", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 0, maintenanceModel: "anthropic/claude-haiku-5-5" } }));
+		store.seed(Loops, { byId: { L1: baseLoop({ kind: "ci-health" }) }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.equal(currentModel, "anthropic/claude-haiku-5-5", "runs on the cheap model");
+		const checkpoint = directives.at(-1)!.checkpoint as { restoreModel?: string; costBefore: number };
+		assert.equal(checkpoint.restoreModel, "anthropic/claude-sonnet-5-5");
+		await phases.await(task({ phase: "await", iteration: 0, costBefore: checkpoint.costBefore, restoreModel: checkpoint.restoreModel }), runtime(), context);
+		assert.equal(currentModel, "anthropic/claude-sonnet-5-5", "the session gets its model back");
+	});
+
+	it("leaves goal loops on the session's model", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 0, maintenanceModel: "anthropic/claude-haiku-5-5" } }));
+		store.seed(Loops, { byId: { L1: baseLoop() }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.equal(currentModel, "anthropic/claude-sonnet-5-5");
+		assert.equal((directives.at(-1)!.checkpoint as { restoreModel?: string }).restoreModel, undefined);
 	});
 });

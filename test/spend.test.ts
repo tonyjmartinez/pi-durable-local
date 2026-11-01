@@ -139,3 +139,27 @@ describe("nextRoomAt", () => {
 		assert.equal(nextRoomAt([], NOW, 1), undefined);
 	});
 });
+
+describe("factory-wide spend from session totals", () => {
+	const h = 60 * 60_000;
+	it("samples at most every five minutes and keeps one baseline older than the window", async () => {
+		const { recordTotal } = await import("../src/spend.ts");
+		let s = recordTotal(undefined, 1, 0);
+		s = recordTotal(s, 2, 60_000);
+		assert.deepEqual(s, [{ at: 0, total: 1 }]);
+		s = recordTotal(s, 2, h);
+		s = recordTotal(s, 3, 3 * DAY_MS);
+		s = recordTotal(s, 4, 3 * DAY_MS + h);
+		assert.deepEqual(s.map((x) => x.total), [2, 3, 4], "very old samples go, but the newest old one stays as a baseline");
+	});
+	it("charges the change since the window started, loops or not", async () => {
+		const { totalSpendInWindow } = await import("../src/spend.ts");
+		const samples = [{ at: 0, total: 5 }, { at: 2 * h, total: 8 }, { at: 20 * h, total: 12 }];
+		assert.equal(totalSpendInWindow(samples, 20, 25 * h), 15, "baseline is the newest sample at or before the window start (5 at 0h)");
+		assert.equal(totalSpendInWindow(samples, 20, 27 * h), 12, "later, the 8 at 2h is the baseline");
+		assert.equal(totalSpendInWindow(samples, 20, 10 * h), 15, "a young history uses the oldest sample");
+		assert.equal(totalSpendInWindow(samples, 20, 25 * h, 19 * h), 8, "a reset (since) moves the baseline forward");
+		assert.equal(totalSpendInWindow(samples, 1, 25 * h), 0, "never negative");
+		assert.equal(totalSpendInWindow(undefined, 9, 0), 0);
+	});
+});
