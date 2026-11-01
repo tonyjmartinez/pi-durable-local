@@ -45,7 +45,14 @@ describe("agenda in the brief", () => {
 
 describe("buildBrief", () => {
 	it("says so when nothing needs a general", () => {
-		assert.match(buildBrief(base), /^NEEDS A GENERAL: nothing/);
+		assert.match(buildBrief(base), /^NEEDS A GENERAL: no pending decisions/);
+	});
+
+	it("does not call a budget-blocked workforce unblocked", () => {
+		const out = buildBrief({ ...base, budget: { capUsd: 10, daySpend: 17.45, exceeded: true, running: 0, waiting: 0 } });
+		assert.match(out, /^NEEDS A GENERAL: no pending decisions/);
+		assert.doesNotMatch(out, /workforce is unblocked/);
+		assert.match(out, /waiting for room/);
 	});
 
 	it("puts parked PRs, stuck loops and decisions first, with the command to act", () => {
@@ -62,7 +69,7 @@ describe("buildBrief", () => {
 		assert.match(out, /decision o\/r#4: Pick a browser/);
 	});
 
-	it("counts merges in the last day and lists working and dormant loops", () => {
+	it("counts merges in the last day and lists scheduled and dormant loops", () => {
 		const out = buildBrief({
 			...base,
 			audit: [{ at: "2026-10-30T12:00:00Z", event: "merged", repo: "o/r", pr: 9 }, { at: "2026-10-01T00:00:00Z", event: "merged", repo: "o/r", pr: 1 }],
@@ -73,7 +80,7 @@ describe("buildBrief", () => {
 			sessions: [{ name: "a", busy: true, model: "anthropic/claude-sonnet-5-5", cost: 1.5 }],
 		});
 		assert.match(out, /LAST 24H: 1 merged \(o\/r#9\)/);
-		assert.match(out, /1 loops working, 1 dormant/);
+		assert.match(out, /1 loops scheduled, 1 dormant/);
 		assert.match(out, /L2 b \(dormant\)/);
 		assert.match(out, /Models in use: anthropic\/claude-sonnet-5-5/);
 	});

@@ -91,11 +91,11 @@ export function pivotStale(dir: PivotDirection, loops: readonly PivotLoop[], now
 	return out;
 }
 
-/** The PIVOTS section lines (empty when no direction was set in the last 48h). */
+/** Recent directions, plus older directions with an unresolved acknowledgment on an active loop. */
 export function pivotLines(directions: readonly PivotDirection[], loops: readonly PivotLoop[], now: number): string[] {
-	const recent = directions.filter((d) => now - d.at <= PIVOT_WINDOW);
+	const recent = directions.filter((d) => now - d.at <= PIVOT_WINDOW || loops.some((l) => l.status === "active" && d.acks[l.id]?.status === "pending"));
 	if (recent.length === 0) return [];
-	const lines = ["", "PIVOTS (directions set in the last 48h)"];
+	const lines = ["", "PIVOTS (last 48h or acknowledgment pending)"];
 	for (const dir of recent) {
 		lines.push(`- ${dir.key} v${dir.version} by ${dir.by}, ${when(dir.at)}: ${clip(dir.text, 160)}`);
 		const mine = loops.filter((l) => l.status === "active" && dir.acks[l.id] !== undefined);
