@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# pd-mcp: read-only MCP server for ChatGPT/Claude apps (127.0.0.1 only). See docs/chat-console.md.
+exec node --no-warnings "$(dirname "$(readlink -f "$0")")/../src/mcp.ts" "$@"
