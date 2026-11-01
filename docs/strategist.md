@@ -42,7 +42,7 @@ New preset and kind `strategy`, modelled on src/devil.ts (rotating lenses, pure 
 - a `proposal` issue reached its default-by time.
 Otherwise skip. At most one strategist run per repo per 6h unless the product loop is starving.
 
-**Inputs:** README, PLAN/VISION/DIRECTION (the per-repo direction from the pd-direction work, when it lands), ROADMAP.md, docs/IDEAS.md, LOG, the last ~30 merged PR titles, open issues, builder idle notes, `pd mem` (including `taste:<repo>` entries), and the live product. Chromium works, so it should screenshot or play the product at 390px and desktop. It may use web_fetch briefly for genre or competitor teardowns (at most 3 fetches).
+**Inputs:** README, the repo's current direction (set with `pd direct`, landed in #26; the strategist's anchor, read first and never contradicted without a proposal), ROADMAP.md, docs/IDEAS.md, LOG, the last ~30 merged PR titles, open issues, builder idle notes, `pd mem` (including `taste:<repo>` entries), and the live product. Chromium works, so it should screenshot or play the product at 390px and desktop. It may use web_fetch briefly for genre or competitor teardowns (at most 3 fetches).
 
 **Lenses** (rotate one per run, recorded so it never repeats the last 3):
 1. Persona walkthrough: a first-time visitor/player, a returning one, a phone user. Use the product in the browser and write down every moment of confusion, boredom or delight.
@@ -87,7 +87,7 @@ A portfolio-level preset (`venture`, one instance, not per repo) that proposes n
 - **Wakes:** weekly, plus whenever at least half of the active project loops are dormant or idle.
 - **Inputs:** the list of Tony's repos (gh repo list, read-only), `pd mem` (owner decisions, taste), what each existing project is, and what the factory is good at (Astro static sites, canvas games, Cloudflare Workers, data snapshot sites). Plus lenses: a remix of two existing projects; a tool the factory itself wishes it had; an idea from one of Tony's interests (games, plants, NBA stats, AI agents, his portfolio); a "weekend-sized" game; a useful public utility.
 - **Output:** 3 pitches per run as markdown files in `~/proj/pd-ventures/pitches/<date>-<slug>.md`. Each has: one-line hook, who it is for, why Tony, a first milestone of about 5 PRs, risks (legal/data/licensing), and a cost guess. For the top pitch, a spike prototype in `~/proj/pd-ventures/spikes/<slug>/` (local only, no remote, no repo creation) with a screenshot.
-- `pd brief` gets a PITCHES section. `pd pitch approve <slug>` is human/general-only. It runs `gh repo create tonyjmartinez/<slug> --private`, seeds it from the spike plus a VISION.md from the pitch, then `pd factory` with the product-gardener and strategist presets. Agents never create repos. `pd pitch reject <slug> "why"` records taste.
+- `pd brief` gets a PITCHES section. `pd pitch approve <slug>` is human/general-only. It runs `gh repo create tonyjmartinez/<slug> --private`, seeds it from the spike plus a first direction taken from the pitch (`pd direct`), then `pd factory` with the product-gardener and strategist presets. Agents never create repos. `pd pitch reject <slug> "why"` records taste.
 - Approving a pitch is a one-way, outward-facing action. It always waits for Tony.
 
 ## Budget
