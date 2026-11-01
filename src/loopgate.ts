@@ -37,6 +37,7 @@ export type GateCi = {
 export type GatePr = {
 	number: number;
 	headSha: string;
+	createdAt?: number;
 	/** The head commit the last pr_tick looked at. */
 	lastTickedSha?: string;
 	checksState: "pending" | "pass" | "fail";

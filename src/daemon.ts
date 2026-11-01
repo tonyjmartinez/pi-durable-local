@@ -49,7 +49,10 @@ import {
 	validateSessionName,
 	worktreeCwdProblem,
 } from "./ops.ts";
-import { Approvals, audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
+import { applyDirection, directionKey } from "./direction.ts";
+import { postChat } from "./chat.ts";
+import { githubRepoOf } from "./extensions.ts";
+import { Approvals, audit, Directions, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
 const run = promisify(execFile);
@@ -137,6 +140,14 @@ harness.closed.then((end) => {
 
 // ---------------------------------------------------------------------------------------------------------------
 // Operations shared by the HTTP routes.
+
+/** owner/repo as given, or the key of the named session. */
+async function resolveDirectionKey(target: string): Promise<string> {
+	if (target.includes("/")) return target;
+	const info = (await harness.snapshot(Sessions, context))?.byName[target];
+	if (info === undefined) throw new HttpError(404, `no session named ${target}`);
+	return directionKey(target, githubRepoOf(info.remote));
+}
 
 async function sessionByName(name: string): Promise<{ conversation: Conversation; cwd: string }> {
 	const sessions = await harness.snapshot(Sessions, context);
@@ -348,6 +359,35 @@ const routes: [string, RegExp, Route][] = [
 			delete memories.items[m[1]!];
 			return { removed: existed };
 		}, context)],
+	["GET", /^\/directions$/, async () => (await harness.snapshot(Directions, context))?.byKey ?? {}],
+	["GET", /^\/directions\/(.+)$/, async (m) => {
+		const key = await resolveDirectionKey(decodeURIComponent(m[1]!));
+		return { key, direction: (await harness.snapshot(Directions, context))?.byKey[key] ?? null };
+	}],
+	["POST", /^\/directions\/(.+)$/, async (m, body) => {
+		const key = await resolveDirectionKey(decodeURIComponent(m[1]!));
+		const by = String(body.by ?? "general");
+		const sessions = (await harness.snapshot(Sessions, context))?.byName ?? {};
+		const mine = new Set(Object.keys(sessions).filter((name) => directionKey(name, githubRepoOf(sessions[name]!.remote)) === key));
+		const woken: string[] = [];
+		const result = await harness.commit(async (tx) => {
+			const loops = Object.values((await tx.doc(Loops)).byId).filter((l) => mine.has(l.session) && (l.status === "active" || l.status === "paused"));
+			const out = applyDirection(await tx.doc(Directions), key, { text: String(body.text ?? ""), by, now: Date.now() }, loops);
+			for (const id of out.woken) {
+				const loop = (await tx.doc(Loops)).byId[id]!;
+				await endLiveTask(harness, loop.taskId, context, { wait: false }).catch(() => undefined);
+				loop.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true });
+				woken.push(id);
+			}
+			return { direction: JSON.parse(JSON.stringify(out.direction)) as unknown, loops: Object.keys((out.direction as { acks: object }).acks) };
+		}, context).catch((error: unknown) => {
+			throw new HttpError(400, String((error as Error).message ?? error));
+		});
+		const version = (result.direction as { version: number }).version;
+		audit("direction_set", { repo: key, version, by, loops: result.loops, woken });
+		await postChat({ from: by, to: "all", text: `DIRECTION ${key} v${version}: ${String(body.text).trim()} (loops ${result.loops.join(", ") || "none"} must acknowledge)` }).catch(() => undefined);
+		return result;
+	}],
 	["GET", /^\/loops$/, async () => Object.values((await harness.snapshot(Loops, context))?.byId ?? {})],
 	["POST", /^\/loops$/, (_m, body) => startLoop(body)],
 	["POST", /^\/loops\/([^/]+)\/set$/, async (m, body) => {

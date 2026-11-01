@@ -273,7 +273,9 @@ async function brief(): Promise<void> {
 		const out = gh(["search", "issues", "--owner", owner, "--label", "needs-decision", "--state", "open", "--json", "repository,number,title"]);
 		return out.status === 0 ? (JSON.parse(out.stdout || "[]") as Json[]).map((i) => ({ repo: i.repository.nameWithOwner, number: i.number, title: i.title })) : [];
 	});
-	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions }));
+	const dirs = (await call("GET", "/directions")) as Record<string, Json>;
+	const directions = Object.entries(dirs).map(([key, d]) => ({ key, ...d }));
+	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, directions: directions as never }));
 }
 
 function printLoop(loop: Json): void {
@@ -327,6 +329,8 @@ const HELP = `pd — pi-durable sessions that keep running
   pd factory <owner/repo> ["goal"] [--preset product-gardener] [--base main] [--merge] [--name n]
                                             clone, create a session, and (with a goal or preset) start a loop
   pd status                                 sessions, loops, spend
+  pd direct <session|owner/repo> ["text"] [--by name]   show or set the repo's direction; every loop must acknowledge it
+  pd direct <session|owner/repo> ["text"] [--by n]  show or set a repo direction every loop must ack
   pd brief                                  for generals: what needs a decision, then the workforce
   pd new <name> --cwd <dir> [--purpose "…"] [--model provider/id]
   pd attach <name>                          live view + chat (Ctrl-C detaches; agent keeps going)
@@ -424,6 +428,18 @@ async function main(argv: string[]): Promise<void> {
 		case "tmux": {
 			const names = positional.length > 0 ? positional : ((await call("GET", "/status")).sessions as Json[]).map((s) => s.name);
 			return tmux(names);
+		}
+		case "direct": {
+			const [target = "", ...words] = positional;
+			const path = `/directions/${encodeURIComponent(target)}`;
+			if (words.length === 0) {
+				const { key, direction: d } = await call("GET", path);
+				console.log(d === null ? `${key}: no direction set` : `${key} v${d.version} (by ${d.by}, ${new Date(d.at).toISOString()}): ${d.text}\n${Object.entries(d.acks as Json).map(([id, a]) => `  ${id}: ${(a as Json).status}`).join("\n")}`);
+			} else {
+				const { direction: d, loops } = await call("POST", path, { text: words.join(" "), by: typeof opts.by === "string" ? opts.by : undefined });
+				console.log(`direction v${d.version} set; loops pending: ${loops.join(", ") || "none"}`);
+			}
+			return;
 		}
 		case "loop": {
 			const [sub = "ls", ...loopArgs] = positional;

@@ -35,7 +35,8 @@ import { checkToolCall, protectedMatches } from "./guard.ts";
 import { testWeakening } from "./testguard.ts";
 import { type CheckBucket, type PrDecision, type PrTickOptions, type PrTickState, decidePr } from "./prtick.ts";
 import { effectiveRisk, maxTier, type ParsedPr, parsePrBody, PR_TEMPLATE, type RiskFile, riskFloor, type Tier } from "./prtemplate.ts";
-import { Approvals, audit, Branches, type Loop, Loops, type Memory, Memories, Parked, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
+import { directionKey, directionPrompt, prsPredating, recordAck, type Direction } from "./direction.ts";
+import { Approvals, audit, Branches, Directions, type Loop, Loops, type Memory, Memories, Parked, Reviews, type SessionInfo, sessionNameOf, Sessions, Subagents } from "./state.ts";
 
 const run = promisify(execFile);
 
@@ -1398,10 +1399,10 @@ export async function sessionCost(reader: { snapshot: Harness["snapshot"] }, ses
 	return total;
 }
 
-export function loopPrompt(loop: Loop, policy: Policy, wakeReason?: string): string {
+export function loopPrompt(loop: Loop, policy: Policy, wakeReason?: string, direction?: Direction, oldPrs: readonly { number: number }[] = []): string {
 	return `[loop ${loop.id}, iteration ${loop.iteration + 1}/${loop.maxIterations}]
 ${wakeReason ? `Woken because: ${wakeReason}
-` : ""}Ongoing goal: ${loop.goal}
+` : ""}${directionPrompt(direction, loop.id, oldPrs)}Ongoing goal: ${loop.goal}
 
 Next work item: ${loop.nextTask || "Choose one small slice of the ongoing goal, then save the following slice with loop_report.nextTask."}
 
@@ -1468,14 +1469,14 @@ async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, conte
 	const base = await baseBranchOf(repo, policy, context);
 	const head = JSON.parse(await gh(["api", `repos/${repo}/commits/${base}`, "--jq", "{sha: .sha, at: .commit.committer.date}"], context)) as { sha: string; at: string };
 	const me = await viewerLogin(context);
-	const prs = (JSON.parse(await gh(["pr", "list", "--repo", repo, "--author", me, "--state", "open", "--json", "number,headRefOid,headRefName"], context)) as {
-		number: number; headRefOid: string; headRefName: string;
+	const prs = (JSON.parse(await gh(["pr", "list", "--repo", repo, "--author", me, "--state", "open", "--json", "number,headRefOid,headRefName,createdAt"], context)) as {
+		number: number; headRefOid: string; headRefName: string; createdAt: string;
 	}[]).filter((pr) => pr.headRefName.startsWith(policy.automerge.branchPrefix));
 	const openAgentPrs: GatePr[] = [];
 	for (const pr of prs) {
 		const checks = [...(await checksFor(repo, pr.headRefOid, context))];
 		const state = checks.some((c) => c.bucket === "fail" || c.bucket === "cancel") ? "fail" : checks.some((c) => c.bucket === "pending") ? "pending" : "pass";
-		openAgentPrs.push({ number: pr.number, headSha: pr.headRefOid, checksState: state });
+		openAgentPrs.push({ number: pr.number, headSha: pr.headRefOid, createdAt: Date.parse(pr.createdAt), checksState: state });
 	}
 	// Issues waiting on Tony's decision are not work an agent can do, so they never wake a sweep.
 	const openFrictionIssues = loop.kind === "friction-sweep"
@@ -1616,13 +1617,14 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 					audit("loop_fresh_context", { loop: loop.id, iteration });
 				}
 			}
+			const direction = (await runtime.snapshot(Directions, context))?.byKey[directionKey(loop.session, githubRepoOf(session.remote))];
 			// The loop's spend is the session's cost change across this iteration, measured from just before the prompt.
 			const costBefore = await sessionCost(runtime, loop.session, session.conversationId, context);
 			// The request ID makes a resubmission find the same submission, never a second one.
 			await conversation.submit(
 				{
 					type: "input",
-					content: loopPrompt(loop, policy, gate?.wake ? gate.reason : undefined),
+					content: loopPrompt(loop, policy, gate?.wake ? gate.reason : undefined, direction, direction && facts ? prsPredating(facts.openAgentPrs, direction) : []),
 					entry: { kind: "pdl.loop-tick", data: { loopId: loop.id, iteration } },
 					requestId: `loop:${loop.id}:${iteration}`,
 				},
@@ -1702,6 +1704,7 @@ export const Loops_ = defineExtension({
 				loopId: Type.String(),
 				status: Type.Union([Type.Literal("continue"), Type.Literal("idle"), Type.Literal("done"), Type.Literal("blocked")]),
 				note: Type.String(),
+				directionVersion: Type.Optional(Type.Number({ description: "The version of the current direction you worked under (shown in the prompt); confirms you saw it." })),
 				nextTask: Type.Optional(Type.String({ maxLength: 1200, description: "One bounded next slice: relevant files, acceptance criteria, next action. Empty or omitted clears the previous item." })),
 			}),
 			execute: async (args, api, context) => {
@@ -1711,6 +1714,8 @@ export const Loops_ = defineExtension({
 				const updated = await api.commit(async (tx) => {
 					const loop = (await tx.doc(Loops)).byId[args.loopId];
 					if (loop === undefined || loop.session !== caller) return undefined;
+					const remote = (await tx.doc(Sessions)).byName[caller]?.remote;
+					recordAck((await tx.doc(Directions)).byKey[directionKey(caller, githubRepoOf(remote))], loop.id, args.directionVersion, Date.now());
 					loop.note = args.note;
 					loop.nextTask = args.nextTask?.trim() || undefined;
 					if (args.status === "idle") loop.idleReported = true;
