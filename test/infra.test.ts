@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildPipelineDigest, dispatchRefusal, infraEvents, infraWake, pipelineKey, prChecksOf, recentDispatches, reserveDispatch, rollupState, type PipelineRepo } from "../src/infra.ts";
+import { buildPipelineDigest, dispatchRefusal, dispatchCount, infraEvents, infraWake, pipelineKey, prChecksOf, recentDispatches, reserveDispatch, rollupState, type PipelineRepo } from "../src/infra.ts";
 import { newLoop, resolveLoopSpec } from "../src/ops.ts";
 import { priorityOf } from "../src/queue.ts";
 import { shouldWake } from "../src/loopgate.ts";
@@ -11,6 +11,9 @@ const paused = { id: "L1", kind: "ci-health", status: "paused", note: "system fa
 describe("infra evidence", () => {
  it("classifies mixed GitHub check runs and commit statuses without treating pending as green", () => {
   assert.equal(rollupState([]), "none");
+  assert.equal(rollupState([{conclusion:"SKIPPED"}]),"none");
+  assert.equal(rollupState([{conclusion:"NEUTRAL"}]),"none");
+  assert.equal(rollupState([{conclusion:"UNKNOWN_NEW_STATE"}]),"pending");
   assert.equal(rollupState([{ status: "IN_PROGRESS" }]), "pending");
   assert.equal(rollupState([{ state: "PENDING" }]), "pending");
   assert.equal(rollupState([{ conclusion: "SUCCESS" }, { state: "ERROR" }]), "fail");
@@ -59,8 +62,10 @@ describe("infra cost gate and dispatch authority", () => {
   for(let i=0;i<3;i++) reserveDispatch(doc,now+i);
   assert.throws(()=>reserveDispatch(doc,now+3),/quota/);
   assert.equal(doc.infraDispatches!.length,3);
+  assert.equal(dispatchCount(doc,now+3),3);
   reserveDispatch(doc,now+25*hour);
   assert.equal(doc.infraDispatches!.length,1);
+  assert.equal(dispatchCount(doc,now+25*hour),1);
  });
  it("wires an hourly high-priority bounded preset with its own cross-repo gate", () => {
   const spec=resolveLoopSpec({preset:"infra-lead"});

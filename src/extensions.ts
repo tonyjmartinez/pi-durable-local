@@ -9,7 +9,7 @@ export const ASSISTANT_FULL_RUN_HOURS = 12;
 import { countUnchecked, lensPrompt, proposalDue, recordLens } from "./strategist.ts";
 import { auditTail } from "./ops.ts";
 import { repoMap } from "./repomap.ts";
-import { buildPipelineDigest, dispatchRefusal, infraEvents, infraWake, MAX_DISPATCHES_PER_DAY, type PipelineRepo, pipelineKey, prChecksOf, recentDispatches, reserveDispatch } from "./infra.ts";
+import { buildPipelineDigest, dispatchRefusal, infraEvents, infraWake, MAX_DISPATCHES_PER_DAY, type PipelineRepo, pipelineKey, prChecksOf, recentDispatches, reserveDispatch, dispatchCount } from "./infra.ts";
 import { applyResume, assertNoTwin, newLoop, resolveLoopSpec, assertNoTwinOnResume } from "./ops.ts";
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
@@ -2048,7 +2048,8 @@ export const Loops_ = defineExtension({
 			parameters: Type.Object({ windowHours: Type.Optional(Type.Number({ minimum: 1, maximum: 336 })) }),
 			execute: async (args, api, context) => {
 				const { name: caller } = await sessionCwd(api, api.conversationId, context);
-				const loops = Object.values((await api.snapshot(Loops, context))?.byId ?? {});
+				const loopDoc = await api.snapshot(Loops, context);
+				const loops = Object.values(loopDoc?.byId ?? {});
 				if (!isInfraLead(loops, caller)) return fail("pipeline_evidence is only for a session running an infra-lead loop.");
 				const now = Date.now();
 				const sessions = (await api.snapshot(Sessions, context))?.byName ?? {};
@@ -2061,7 +2062,7 @@ export const Loops_ = defineExtension({
 					spend: budget.pace
 						? { spentUsd: budget.pace.spent, allowanceUsd: budget.pace.allowance, windowHours: budget.pace.windowHours, ...(budget.weekAvgPerDay !== undefined ? { weekAvgPerDay: budget.weekAvgPerDay } : {}) }
 						: { spentUsd: budget.daySpend, allowanceUsd: budget.capUsd, ...(budget.weekAvgPerDay !== undefined ? { weekAvgPerDay: budget.weekAvgPerDay } : {}) },
-					dispatchesLeft: Math.max(0, MAX_DISPATCHES_PER_DAY - recentDispatches(state.audit, now)),
+					dispatchesLeft: Math.max(0, MAX_DISPATCHES_PER_DAY - dispatchCount(loopDoc, now)),
 					...(args.windowHours === undefined ? {} : { windowHours: args.windowHours }),
 				}));
 			},
@@ -2070,7 +2071,7 @@ export const Loops_ = defineExtension({
 			name: "ci_dispatch",
 			deferred: true,
 			description:
-				`Infra-lead loops only: put a ci-health loop to work. action "start" puts a ci-health loop (hourly gate, $5 budget, model only on a red or flaky base) on a session that has none; action "resume" resumes a paused ci-health loop with a fresh budget window. At most ${MAX_DISPATCHES_PER_DAY} per 24h, refused while spend is over the pacing allowance, and never overturns a person's pause or the budget reviewer's cut. Audited and posted to the agent chat.`,
+				`Infra-lead loops only: put a ci-health loop to work. action "start" puts a ci-health loop (hourly gate, $5 budget, model only on a red or flaky base) on a session that has none; action "resume" resumes a system-paused ci-health loop within its remaining worker allowance (never renews an exhausted budget). At most ${MAX_DISPATCHES_PER_DAY} per 24h, refused while spend is over the pacing allowance, and never overturns a person's pause or the budget reviewer's cut. Audited and posted to the agent chat.`,
 			parameters: Type.Object({
 				action: Type.Union([Type.Literal("start"), Type.Literal("resume")]),
 				session: Type.Optional(Type.String({ description: "start: the session whose repo needs a ci-health loop" })),
@@ -2100,7 +2101,7 @@ export const Loops_ = defineExtension({
 				const refusal = dispatchRefusal({
 					action: args.action,
 					...(args.action === "start" && target !== undefined ? { session: { name: targetName!, ...(repo ? { repo } : {}) } } : {}),
-					...(existing !== undefined ? { loop: { id: existing.id, ...(existing.kind ? { kind: existing.kind } : {}), status: existing.status, note: existing.note, taskLive } } : {}),
+					...(existing !== undefined ? { loop: { id: existing.id, ...(existing.kind ? { kind: existing.kind } : {}), status: existing.status, note: existing.note, taskLive, spent: existing.spent, budgetUsd: existing.budgetUsd, iteration: existing.iteration, maxIterations: existing.maxIterations } } : {}),
 					recent: recentDispatches(auditEntries, now),
 					...(overPace !== undefined ? { budgetRefusal: overPace } : {}),
 				});
@@ -2141,7 +2142,10 @@ export const Loops_ = defineExtension({
 							const why = dispatchRefusal({ action: "resume", loop: { ...loop, taskLive }, recent: 0 });
 							if (why) throw new Error(why);
 							assertNoTwinOnResume(Object.values(doc.byId), loop);
+							const remainingSpent = loop.spent ?? 0;
 							applyResume(loop, cost, Date.now());
+							// A model-triggered repair resume is not authority to renew the worker budget.
+							loop.spent = remainingSpent;
 							loop.note = `resumed by ${caller}`;
 							loop.taskId = await tx.createTask(LoopTask, { loopId: loop.id }, { ownership: { kind: "conversation" }, background: true });
 							loopId = loop.id;
@@ -2304,6 +2308,7 @@ async function pipelineState(loops: readonly Loop[], sessions: Record<string, Se
 				.then((out) => (JSON.parse(out) as { number: number; headRefName: string; statusCheckRollup?: never }[]).filter((pr) => pr.headRefName.startsWith(policy.automerge.branchPrefix)))
 				.catch(() => undefined);
 		const summary = ci === undefined ? undefined : summarizeRuns(ci.runs);
+		const pendingRuns = summary === undefined || ci === undefined ? 0 : ci.runs.filter((run) => run.headSha === summary.headSha && run.status !== "completed").length;
 		repos.push({
 			repo,
 			base: base ?? "unreadable",
@@ -2312,6 +2317,7 @@ async function pipelineState(loops: readonly Loop[], sessions: Record<string, Se
 			...(ci !== undefined && ci.runs.length === 0 ? { noCi: true } : {}),
 			prChecks: prChecksOf(prs ?? []),
 			prChecksReadable: prs !== undefined,
+			pendingRuns,
 			...(ciLoop !== undefined ? { ciLoop: { id: ciLoop.id, status: ciLoop.status, dormant: ciLoop.dormant !== undefined, ...(ciLoop.note ? { note: ciLoop.note } : {}) } } : {}),
 		});
 	}

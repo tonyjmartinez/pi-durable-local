@@ -1,0 +1,30 @@
+# Infra refinement: durable continuation
+
+Tony explicitly requested ongoing refinement after Codex usage ends on 2026-11-01. The improvement worker is **infra-refinement / L69**, in `/home/tonyjmartinez/proj/pi-durable-infra-refinement`: every 180 minutes, low priority (4), at most 12 iterations and **$1.50 total**. Global pacing, budgets, policy and service state are unchanged. Initial state was active at 0/12, queued by ordinary pacing; this is not evidence its first review ran. The worker has a separate clone with dependencies installed. Claude general owns continuity and review when Codex is absent; claude-infra is the original implementation collaborator, not its independent reviewer.
+
+This improvement worker is distinct from the production **infra-lead** preset. PR #59 must receive independent review before deployment/production activation. Do not run an unreviewed branch daemon or start extra leads to work around that boundary. Codex owns edits on codex/infra-lead while active; L69 initially reviews that head and reports concrete gaps without concurrent edits or repeat unchanged-head review. After seed merge and Codex yield, use small separate non-automerge branches from main. If assigned a premerge follow-up, use a separate branch based on the seed and target that base explicitly; do not duplicate its full diff against main.
+
+## Iteration protocol
+
+1. Read AGENTS, shared chat and current PR/review status; claim one unclaimed item. Record reviewed head and last outcome so a no-change wake does not repeat paid analysis. Unchanged review or no useful remaining item should report idle, not manufacture work.
+2. Reproduce one concrete problem with a failing regression or documented operational evidence. Prefer existing local code/tests over broad research. Leave policy, guard, sandbox and .github changes for owner review; propose new authority instead of implementing it autonomously.
+3. Make the smallest useful fix and run relevant targeted tests. Before any PR run typecheck and the full npm test suite. Preserve assertions and all existing safety gates. Report actual checks and limitations, including an unavailable live host; never label simulated success as production evidence.
+4. Open one small PR, request independent review through pd-chat and leave its next check/owner in this file. Never selfmerge a factory PR or restart/deploy services. Existing user pauses and budget-review cuts remain authoritative. Do not dispatch other paid sessions, spawn paid agents, change priorities, boost or renew budgets.
+5. At the allowance boundary, leave the remaining item and exact blocker with claude-general. Future continuation beyond the configured allowance needs an explicit operator decision, not an automatic new loop.
+
+## Backlog (take one, avoid overlapping open PRs)
+
+- **Covered in PR #59:** cross-repository evidence, budget-aware wake gate, persisted 3/day quota, repo-wide duplicate CI workers, pause/authority/spend races, deferred tool registration, CLI scorecard, setup/activation docs.
+- **Covered in current follow-up on #59:** unknown/skipped-only PR checks cannot count as passed; pending current-head runs are separate from historical completed failures; remaining dispatch quota comes from persisted reservations; unreadable branch/PR evidence stays unknown. Tests exercise real tool entrypoints with fake gh, not only pure helpers.
+- **Covered in current follow-up on #59:** real LoopTask phase regressions for unchanged infra evidence, near-budget hold-back and red-base exceptions; prove no model submission when skipped, and that infra never becomes dormant from a no-op report. Keep the global pacing gate authoritative.
+- **Covered in current follow-up on #59:** infra resume preserves worker spend and refuses exhausted budgets/iteration limits; only an operator can renew an allowance.
+- **Next:** blocked/non-test conclusions (cancelled, action-required, skipped-only workflows) and incomplete/paginated run/PR evidence must remain explicit. Do not infer a deploy succeeded because some workflow was green.
+- **Next:** avoid repeatedly collecting the same GitHub evidence during gate and tool calls in one tick if profiling shows measurable API/time overhead; any cache must be bounded and report its age, never hide changes in protected state.
+- **Next:** after reviewed deployment, operator-run smoke checklist: one read-only pipeline evidence collection, scorecard display, unchanged tick skips model; no paid repair dispatch needed just to test wiring. Record deployed SHA and command results, keeping unknowns visible.
+- **Later:** measure actual dispatch-to-fix outcomes from the scorecard and audit before adding broader authority. Use owner priorities and existing budget review; proposals only for new trust boundaries.
+
+## Toolchain and evidence
+
+Ubuntu default Node is selected with `source ~/.nvm/nvm.sh; nvm use --silent default`. Install per clone with `npm ci --no-audit --no-fund`; do not symlink writable node_modules across concurrent worktrees. `npm run typecheck` and `npm test` are canonical. Focused tests: `node --test test/infra.test.ts test/infra-tools.test.ts test/looptask.test.ts test/brief.test.ts`. No special credentials are required for isolated tests. Read-only live status uses the documented pd client/gh; never open live sqlite separately.
+
+Baseline PR #59 HEAD e7c1ff9 passed local typecheck +965 tests and GitHub CI before the evidence-accuracy follow-up. Refresh latest commit and checks before relying on this historical baseline. General handoff and environment tips are in pd-chat; shared memory #186 records initial ownership/PR. A later entry should state exact head, tests, PR and next item instead of appending a stream of unchanged status messages.

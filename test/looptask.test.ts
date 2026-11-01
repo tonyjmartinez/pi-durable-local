@@ -1356,3 +1356,44 @@ describe("deferred tools", () => {
 		assert.match(ext.WORKFLOW_TEXT, /deferred: load one with tool_search first/);
 	});
 });
+
+
+describe("infra lead phase wiring", () => {
+ const scriptInfra = (red=false) => gh.script([
+  {match:"^repo view o/r",responses:["main"]},
+  {match:"^api repos/o/r/commits/main",responses:[JSON.stringify({sha:BASE_SHA,at:recent()})]},
+  {match:"^api user",responses:["factorybot"]},
+  {match:"^pr list",responses:["[]"]},
+  {match:"^issue list",responses:["[]"]},
+  {match:"^run list",responses:[JSON.stringify([{headSha:BASE_SHA,workflowName:"tests",status:"completed",conclusion:red?"failure":"success",createdAt:recent()}])]},
+ ]);
+ it("skips a second unchanged cross-repo review without submitting another model turn",async()=>{
+  setup({loop:{kind:"infra"},remote:REMOTE});scriptInfra();
+  await phases.run(task({phase:"run",iteration:0}),runtime(),context);
+  assert.equal(submits.length,1);assert.ok(loopDoc()!.lastPipelineKey);
+  await phases.await(task({phase:"await",iteration:0,costBefore:0}),runtime(),context);
+  assert.equal(loopDoc()!.iteration,1);
+  await phases.run(task({phase:"run",iteration:1}),runtime(),context);
+  assert.equal(submits.length,1);assert.match(loopDoc()!.note,/pipeline unchanged/);
+ });
+ it("holds back near budget for green evidence but permits red-base triage while below the hard cap",async()=>{
+  setup({loop:{kind:"infra",spendLog:[{at:Date.now(),usd:8}]},remote:REMOTE});
+  writeFileSync(join(process.env.PD_CONFIG_DIR!,"policy.json"),JSON.stringify({loops:{dailyBudgetUsd:10,pace:false}}));scriptInfra();
+  await phases.run(task({phase:"run",iteration:0}),runtime(),context);
+  assert.equal(submits.length,0);assert.match(loopDoc()!.note,/pacing allowance/);
+  scriptInfra(true);
+  await phases.run(task({phase:"run",iteration:0}),runtime(),context);
+  assert.equal(submits.length,1);
+ });
+ it("never lets a red base override the hard pacing allowance",async()=>{
+  setup({loop:{kind:"infra",spendLog:[{at:Date.now(),usd:3}]},remote:REMOTE});
+  writeFileSync(join(process.env.PD_CONFIG_DIR!,"policy.json"),JSON.stringify({loops:{dailyBudgetUsd:10,pace:true,paceBurst:1,paceWindowHours:3}}));scriptInfra(true);
+  await phases.run(task({phase:"run",iteration:0}),runtime(),context);
+  assert.equal(submits.length,0);assert.match(loopDoc()!.note,/pacing/);
+ });
+ it("does not put the infra lead to sleep after an idle report",async()=>{
+  setup({loop:{kind:"infra",noopStreak:4,idleReported:true},remote:REMOTE});scriptInfra();
+  await phases.await(task({phase:"await",iteration:0,costBefore:0}),runtime(),context);
+  assert.equal(loopDoc()!.status,"active");assert.equal(loopDoc()!.dormant,undefined);
+ });
+});

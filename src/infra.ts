@@ -28,11 +28,13 @@ export type PipelineRepo = {
 	sessions: string[];
 	/** The base branch's recent CI; undefined when the runs could not be read. */
 	ci?: GateCi;
-	/** True when the runs were readable and there were none: the repo has no CI on its base branch. */
+	/** The runs query succeeded but returned no recent runs; this does not prove workflow configuration is absent. */
 	noCi?: boolean;
 	prChecks: PrChecks;
 	/** False when PR checks could not be read; absence is not evidence of health. */
 	prChecksReadable?: boolean;
+	/** Latest base-head workflows still running; completed historical results remain separate. */
+	pendingRuns?: number;
 	/** The repo's ci-health loop, if one exists (any live status). */
 	ciLoop?: { id: string; status: string; dormant: boolean; note?: string };
 };
@@ -45,8 +47,9 @@ export function rollupState(rollup: readonly Check[] | null | undefined): "fail"
 	if (checks.length === 0) return "none";
 	const verdicts = checks.map((check) => (check.conclusion ?? check.state ?? "").toUpperCase());
 	if (verdicts.some((v) => ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(v))) return "fail";
-	if (checks.some((check, i) => verdicts[i] === "" || verdicts[i] === "PENDING" || verdicts[i] === "EXPECTED" || (check.status ?? "COMPLETED").toUpperCase() !== "COMPLETED")) return "pending";
-	return "pass";
+	if (checks.some((check, i) => !["SUCCESS", "NEUTRAL", "SKIPPED"].includes(verdicts[i]!) || (check.status ?? "COMPLETED").toUpperCase() !== "COMPLETED")) return "pending";
+	// Skipped/neutral-only checks do not establish that any check actually passed.
+	return verdicts.includes("SUCCESS") ? "pass" : "none";
 }
 
 /** Count open agent PRs by check state. */
@@ -93,8 +96,9 @@ export function pipelineKey(repos: readonly PipelineRepo[], events: readonly { a
 		.sort((a, b) => a.repo.localeCompare(b.repo))
 		.map((repo) => [
 			repo.repo,
+			repo.base,
 			repo.ci === undefined ? (repo.noCi ? "noci" : "?") : `red:${repo.ci.failing.join(",")}|flaky:${repo.ci.flaky.join(",")}`,
-			`prfail:${repo.prChecks.failing.join(",")}|readable:${repo.prChecksReadable !== false}`,
+			`prfail:${repo.prChecks.failing.join(",")}|unchecked:${repo.prChecks.unchecked ?? 0}|readable:${repo.prChecksReadable !== false}`,
 			...(isRed(repo) ? [`redhead:${repo.ci!.headSha}`] : []),
 			repo.ciLoop === undefined ? "noloop" : `${repo.ciLoop.id}:${repo.ciLoop.status}${repo.ciLoop.dormant ? ":dormant" : ""}`,
 		].join(" "));
@@ -122,11 +126,16 @@ export function recentDispatches(audit: readonly Audit[], now: number): number {
 	return audit.filter(validEntry).filter((entry) => entry.event === "infra_dispatch" && Date.parse(entry.at) <= now && now - Date.parse(entry.at) < 24 * 3_600_000).length;
 }
 
+/** Successful dispatch reservations in the rolling day, independent of audit truncation. */
+export function dispatchCount(doc: { infraDispatches?: readonly number[] } | undefined, now: number): number {
+	return (doc?.infraDispatches ?? []).filter((at) => Number.isFinite(at) && at > now - 24 * 3_600_000).length;
+}
+
 /** Reserve inside the loop-document transaction; failures roll back with task creation. */
 export function reserveDispatch(doc: { infraDispatches?: number[] }, now: number): void {
- const recent = (doc.infraDispatches ?? []).filter((at) => at > now - 24 * 3_600_000);
- if (recent.length >= MAX_DISPATCHES_PER_DAY) throw new Error("infra dispatch quota reached (3 per rolling 24h)");
- doc.infraDispatches = [...recent, now];
+	const recent = (doc.infraDispatches ?? []).filter((at) => Number.isFinite(at) && at > now - 24 * 3_600_000);
+	if (dispatchCount(doc, now) >= MAX_DISPATCHES_PER_DAY) throw new Error("infra dispatch quota reached (3 per rolling 24h)");
+	doc.infraDispatches = [...recent, now];
 }
 
 export type DispatchInput = {
@@ -134,7 +143,7 @@ export type DispatchInput = {
 	/** start: the session to put a ci-health loop on. */
 	session?: { name: string; repo?: string };
 	/** start: a live ci-health loop already on that session. resume: the loop to resume. */
-	loop?: { id: string; kind?: string; status: string; note?: string; taskLive: boolean };
+	loop?: { id: string; kind?: string; status: string; note?: string; taskLive: boolean; spent?: number; budgetUsd?: number; iteration?: number; maxIterations?: number };
 	recent: number;
 	/** The budget's own refusal (capRefusal), or the pacing window being over its allowance. */
 	budgetRefusal?: string;
@@ -154,6 +163,8 @@ export function dispatchRefusal(input: DispatchInput): string | undefined {
 	if (loop === undefined) return "no such loop";
 	if (loop.kind !== "ci-health") return `${loop.id} is a ${loop.kind ?? "goal"} loop; the infra lead only resumes ci-health loops`;
 	if (loop.status !== "paused") return `${loop.id} is ${loop.status}, not paused`;
+	if (/^budget reached/.test(loop.note ?? "") || (loop.spent !== undefined && loop.budgetUsd !== undefined && loop.spent >= loop.budgetUsd)) return `${loop.id} exhausted its worker allowance; only a general can renew it`;
+	if (loop.iteration !== undefined && loop.maxIterations !== undefined && loop.iteration >= loop.maxIterations) return `${loop.id} reached its iteration limit; ask a general instead`;
 	// A person's pause and the budget reviewer's cut are decisions; the infra lead does not overturn them.
 	if (/^paused by user/.test(loop.note ?? "")) return `${loop.id} was paused by a person; ask a general instead`;
 	if (/^cut by /.test(loop.note ?? "")) return `${loop.id} was cut by the budget reviewer; file the case for it instead of overturning the cut`;
@@ -169,7 +180,7 @@ const clip = (text: string, length: number) => {
 function repoLine(repo: PipelineRepo): string {
 	const ci = repo.ci === undefined
 		? repo.noCi ? "NO RECENT CI RUNS on the base branch" : "CI unreadable"
-		: isRed(repo) ? `CI RED on ${repo.ci.headSha.slice(0, 7)}: ${repo.ci.failing.join(", ")}` : isFlaky(repo) ? `CI FLAKY: ${repo.ci.flaky.join(", ")}` : "no failing completed CI runs";
+		: isRed(repo) ? `recent completed CI failures (latest run head ${repo.ci.headSha.slice(0, 7)}): ${repo.ci.failing.join(", ")}` : isFlaky(repo) ? `CI FLAKY: ${repo.ci.flaky.join(", ")}` : "no failing completed CI runs";
 	const prs = repo.prChecks;
 	const prText = repo.prChecksReadable === false ? "agent PR checks unreadable" : prs.failing.length + prs.pending + prs.passing + (prs.unchecked ?? 0) === 0
 		? "no open agent PRs"
@@ -177,7 +188,7 @@ function repoLine(repo: PipelineRepo): string {
 	const loop = repo.ciLoop === undefined
 		? "no ci-health loop"
 		: `ci-health ${repo.ciLoop.id} ${repo.ciLoop.status}${repo.ciLoop.dormant ? " dormant" : ""}${repo.ciLoop.note ? ` (${clip(repo.ciLoop.note, 100)})` : ""}`;
-	return `- ${repo.repo} (base ${repo.base}; sessions ${repo.sessions.join(", ") || "none"}): ${ci} | ${prText} | ${loop}`;
+	return `- ${repo.repo} (base ${repo.base}; sessions ${repo.sessions.join(", ") || "none"}): ${ci}${repo.pendingRuns ? `; ${repo.pendingRuns} latest-head workflow(s) pending` : ""} | ${prText} | ${loop}`;
 }
 
 export type PipelineDigestInput = {
@@ -227,7 +238,7 @@ export const INFRA_LEAD_PROMPT = `You are the factory's infrastructure lead: the
 
 Your powers (load pipeline_evidence and ci_dispatch with tool_search first):
 - pipeline_evidence: every project's base-branch CI (red, flaky, none), agent PR checks, ci-health loop coverage, build and deploy events from the audit log, and the spending rate. Read-only.
-- ci_dispatch: start a ci-health loop on a repo that has CI but no ci-health loop, or resume a paused one. A ci-health loop costs nothing while its base is green; it only calls a model on a red or flaky base. Limited to ${MAX_DISPATCHES_PER_DAY} per 24h and refused while spend is over the pacing allowance. It will not overturn a person's pause or the budget reviewer's cut.
+- ci_dispatch: start a ci-health loop on a repo that has CI but no ci-health loop, or resume a system-paused one within its remaining allowance. Exhausted worker allowances require a general. A ci-health loop costs nothing while its base is green; it only calls a model on a red or flaky base. Limited to ${MAX_DISPATCHES_PER_DAY} per 24h and refused while spend is over the pacing allowance. It will not overturn a person's pause or the budget reviewer's cut.
 - session_send: hand ONE well-specified ticket to a project session (at most two per run). Every message costs that session a paid turn, so send a ticket only when it changes what they do, and make it complete: the gap, the evidence, the exact change, how to verify, and the branch prefix pd/ci-.
 - friction_file: route what only Tony can do (workflow files under .github/, secrets, branch protection, deploy settings) as needsDecision, with the proposed file from docs/proposed-ci/ or the exact setting.
 - memory_save: your pipeline scorecard, topic "${PIPELINE_TOPIC}", which generals read at the top of pd brief.
