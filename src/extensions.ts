@@ -8,6 +8,7 @@ import { openParks } from "./brief.ts";
 export const ASSISTANT_FULL_RUN_HOURS = 12;
 import { countUnchecked, lensPrompt, proposalDue, recordLens } from "./strategist.ts";
 import { auditTail } from "./ops.ts";
+import { repoMap } from "./repomap.ts";
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
@@ -78,6 +79,7 @@ Your environment:
 
 Working rules:
 - Work in your session's directory. Read the project's AGENTS.md/README before changing code.
+- Orient with \`repo_map\` instead of ls/find/cat sweeps: no arguments maps the repo (each file's purpose and symbols with line numbers), \`path\` gives one file's full symbol list, \`query\` finds files and symbols by name. Then read only the line ranges you need with sed -n.
 - Never work on main. Start from the latest deploy branch, create a branch with the work-branch prefix, and commit small coherent steps.
 - Verify before you ship: run the project's checks (type-check, tests, build, and the app itself when that is how a change is proven). A PR must say how you verified it.
 - PR descriptions must fill every field of the template that \`pr_create\` enforces (Intent, Door, Cleanup, Why, Testing, System recap with Risk and Touches). Testing lists the commands you actually ran and their results, and says what you could not verify. Door is one-way for anything hard to undo (data, contracts, security, money, public API); those are always left for Tony.
@@ -124,6 +126,26 @@ export const SessionContext = defineExtension({
 				.join("\n");
 		}),
 		section("project", (input) => (input.env?.cwd === undefined ? undefined : projectInstructions(input.env.cwd))),
+	],
+	tools: [
+		defineTool({
+			name: "repo_map",
+			description:
+				"Map of your session's repo from git: each file's line count, purpose (its header comment) and symbols with line numbers. No args: the whole repo. path: one directory, or one file's full symbol list. query: files and symbols whose name contains it. Local and free; use it before grep/cat.",
+			parameters: Type.Object({
+				path: Type.Optional(Type.String({ description: "A directory or file, relative to the repo root." })),
+				query: Type.Optional(Type.String({ description: "Substring of a file path, purpose or symbol name." })),
+			}),
+			execute: async (args, api, context) => {
+				const { cwd } = await sessionCwd(api, api.conversationId, context);
+				if (cwd === undefined) return fail("This conversation is not a named session, so it has no repo.");
+				try {
+					return text(await repoMap(cwd, args));
+				} catch (error) {
+					return fail(`repo_map failed: ${String((error as { stderr?: string }).stderr || error).slice(0, 400)}`);
+				}
+			},
+		}),
 	],
 });
 
@@ -1133,6 +1155,26 @@ export async function dryRunGates(repo: string, number: number, models: Models, 
 	return { action: outcome.decision.action, text: describeTick(outcome) };
 }
 
+/**
+ * The GitHub branches a session acts on: the deploy branch and its own work-prefix branches. Other branches (other
+ * agents' and tools' scratch branches) were 84% of git_sync's output and rode along in every later turn.
+ */
+export function summarizeBranches(heads: string, base: string, prefix: string, limit = 30): string {
+	const rows = heads.split("\n").map((line) => line.trim()).filter(Boolean);
+	const name = (row: string) => row.split(" ")[0]!.replace(/^origin\//, "");
+	const deploy = rows.filter((row) => name(row) === base);
+	const work = rows.filter((row) => name(row) !== base && name(row).startsWith(prefix));
+	const others = rows.filter((row) => name(row) !== base && !name(row).startsWith(prefix) && name(row) !== "HEAD" && name(row) !== "origin").length;
+	const shown = work.slice(0, limit);
+	return [
+		"Branches on GitHub:",
+		...deploy,
+		...shown,
+		...(work.length > shown.length ? [`…and ${work.length - shown.length} more ${prefix}* branches`] : []),
+		...(others > 0 ? [`(${others} other branches not listed; after the fetch, git branch -r shows them)`] : []),
+	].join("\n");
+}
+
 export const Git_ = defineExtension({
 	name: "pdl.git",
 	tools: [
@@ -1152,7 +1194,7 @@ export const Git_ = defineExtension({
 					const repo = githubRepoOf(session.info.remote);
 					const base = repo === undefined ? "<deploy-branch>" : await baseBranchOf(repo, policy, context);
 					return text(
-						`Mirror updated. Now run:\n  git fetch --prune ${mirror} '+refs/remotes/origin/*:refs/remotes/origin/*'\nThen start every new work branch from origin/${base}, never from your current HEAD:\n  git checkout -B ${policy.automerge.branchPrefix}<name> origin/${base}\n\nBranches on GitHub:\n${heads}`,
+						`Mirror updated. Now run:\n  git fetch --prune ${mirror} '+refs/remotes/origin/*:refs/remotes/origin/*'\nThen start every new work branch from origin/${base}, never from your current HEAD:\n  git checkout -B ${policy.automerge.branchPrefix}<name> origin/${base}\n\n${summarizeBranches(heads, base, policy.automerge.branchPrefix)}`,
 					);
 				} catch (error) {
 					return fail(`Sync failed: ${String((error as { stderr?: string }).stderr || error).slice(0, 600)}`);
