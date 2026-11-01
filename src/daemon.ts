@@ -420,12 +420,16 @@ const routes: [string, RegExp, Route][] = [
 		const sessions = (await harness.snapshot(Sessions, context))?.byName ?? {};
 		const mine = new Set(Object.keys(sessions).filter((name) => directionKey(name, githubRepoOf(sessions[name]!.remote)) === key));
 		const woken: string[] = [];
+		// Tasks the woken loops replace. They are ended after the commit: ending a task reads and writes on the Session
+		// line, which the commit already holds, so doing it inside the transaction deadlocks the daemon. A replaced
+		// task's abort leaves its loop alone (the loop's taskId already points at the successor).
+		const replaced: number[] = [];
 		const result = await harness.commit(async (tx) => {
 			const loops = Object.values((await tx.doc(Loops)).byId).filter((l) => mine.has(l.session) && (l.status === "active" || l.status === "paused"));
 			const out = applyDirection(await tx.doc(Directions), key, { text: String(body.text ?? ""), by, now: Date.now() }, loops);
 			for (const id of out.woken) {
 				const loop = (await tx.doc(Loops)).byId[id]!;
-				await endLiveTask(harness, loop.taskId, context, { wait: false }).catch(() => undefined);
+				if (loop.taskId !== undefined) replaced.push(loop.taskId);
 				loop.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true });
 				woken.push(id);
 			}
@@ -433,6 +437,7 @@ const routes: [string, RegExp, Route][] = [
 		}, context).catch((error: unknown) => {
 			throw new HttpError(400, String((error as Error).message ?? error));
 		});
+		for (const taskId of replaced) await endLiveTask(harness, taskId, context, { wait: false }).catch(() => undefined);
 		const version = (result.direction as { version: number }).version;
 		audit("direction_set", { repo: key, version, by, loops: result.loops, woken });
 		await postChat({ from: by, to: "all", text: `DIRECTION ${key} v${version}: ${String(body.text).trim()} (loops ${result.loops.join(", ") || "none"} must acknowledge)` }).catch(() => undefined);
