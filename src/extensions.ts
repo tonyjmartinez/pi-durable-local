@@ -30,7 +30,10 @@ import {
 } from "@earendil-works/pi-durable";
 import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
 import { AUTO_DORMANT_AFTER, afterIteration, CI_RUNS_WINDOW, MAINTENANCE_BRANCH_SLUGS, ciKey, DORMANT_RECHECK_MINUTES, type GatePr, type GateRepo, shouldWake, summarizeRuns, workFingerprint } from "./loopgate.ts";
-import { dailyBudget, dailySpend, nextRoomAt, recordSpend, recordTotal, spendByLoop, totalSpendInWindow } from "./spend.ts";
+import { budgetStatus, dailySpend, nextRoomAt, recordSpend, recordTotal, spendByLoop, totalSpendInWindow } from "./spend.ts";
+
+/** How often a loop waiting on the daily cap looks again (no model call). */
+export const CAP_RECHECK_MINUTES = 60;
 import { QUEUE_RECHECK_MINUTES, takeTurn } from "./queue.ts";
 import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, type FrictionInput, frictionFromAudit } from "./friction.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
@@ -1633,17 +1636,25 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 			const allLoops = Object.values((await runtime.snapshot(Loops, context))?.byId ?? {});
 			const budgetSince = Number.isFinite(policy.loops.dailyBudgetSince) ? policy.loops.dailyBudgetSince! : 0;
 			const budgetLoops = allLoops.map((item) => ({ ...item, spendLog: item.spendLog?.filter((entry) => entry.at >= budgetSince) }));
-			const loopDaily = dailyBudget(budgetLoops, Date.now(), policy.loops.dailyBudgetUsd);
 			// Loops are not the only spenders: direct sends, chat messages and reviews cost too. The daemon samples every
 			// session's total (sampleFactorySpend); charge the day's change, so the cap holds for all pi agents.
 			const samples = (await runtime.snapshot(Loops, context))?.factorySpend;
-			const latestTotal = samples?.[samples.length - 1];
-			const allSpent = Math.max(loopDaily.spent, latestTotal === undefined ? 0 : totalSpendInWindow(samples, latestTotal.total, Date.now(), budgetSince));
-			const capped = policy.loops.dailyBudgetUsd > 0 && Number.isFinite(policy.loops.dailyBudgetUsd);
-			const daily = { spent: allSpent, exceeded: capped && allSpent >= policy.loops.dailyBudgetUsd };
+			const budget = budgetStatus({
+				loops: allLoops,
+				samples,
+				now: Date.now(),
+				capUsd: policy.loops.dailyBudgetUsd,
+				since: budgetSince,
+				...(policy.loops.pace !== undefined ? { pace: policy.loops.pace } : {}),
+				...(policy.loops.paceBurst !== undefined ? { paceBurst: policy.loops.paceBurst } : {}),
+				...(policy.loops.paceWindowHours !== undefined ? { paceWindowHours: policy.loops.paceWindowHours } : {}),
+			});
+			const daily = { spent: budget.daySpend, exceeded: budget.exceeded };
 			if (daily.exceeded) {
-				// Loop charges age out on a known schedule; other spend is only sampled, so look again in half an hour.
-				const at = loopDaily.exceeded ? nextRoomAt(budgetLoops, Date.now(), policy.loops.dailyBudgetUsd) ?? Date.now() + 60 * 60_000 : Date.now() + 30 * 60_000;
+				// Look again within the hour even when the oldest loop charge ages out later: other spend is only sampled,
+				// and the cap or its start can change. A check costs no model call.
+				const roomAt = budget.loopDaySpend >= policy.loops.dailyBudgetUsd ? nextRoomAt(budgetLoops, Date.now(), policy.loops.dailyBudgetUsd) : undefined;
+				const at = Math.min(roomAt ?? Number.POSITIVE_INFINITY, Date.now() + CAP_RECHECK_MINUTES * 60_000);
 				audit("loop_skip", { loop: loop.id, reason: `daily budget $${policy.loops.dailyBudgetUsd} reached ($${daily.spent.toFixed(2)})`, nextCheckMinutes: Math.ceil((at - Date.now()) / 60_000) });
 				await runtime.commit(async (tx) => {
 					const current = (await tx.doc(Loops)).byId[task.input.loopId]!;
@@ -1686,16 +1697,13 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 
 			// Take a turn: a free slot, room in the hour's paced spend, and no higher-priority loop waiting first.
 			const queued = Object.values((await runtime.snapshot(Loops, context))?.byId ?? {});
-			const hour = 60 * 60_000;
-			const hourSpend = Math.max(dailySpend(budgetLoops, Date.now(), hour), latestTotal === undefined ? 0 : totalSpendInWindow(samples, latestTotal.total, Date.now(), budgetSince, hour));
-			const burst = Number.isFinite(policy.loops.paceBurst) && policy.loops.paceBurst! > 0 ? policy.loops.paceBurst! : 2;
 			const turn = takeTurn({
 				loop,
 				loops: queued,
 				now: Date.now(),
 				maxConcurrent: Number.isFinite(policy.loops.maxConcurrent) ? policy.loops.maxConcurrent! : 0,
-				hourSpend,
-				...(policy.loops.pace && capped ? { hourAllowance: (policy.loops.dailyBudgetUsd / 24) * burst } : {}),
+				hourSpend: budget.pace?.spent ?? 0,
+				...(budget.pace ? { hourAllowance: budget.pace.allowance, paceWindowHours: budget.pace.windowHours } : {}),
 			});
 			if (!turn.start) {
 				audit("loop_skip", { loop: loop.id, reason: turn.reason, nextCheckMinutes: QUEUE_RECHECK_MINUTES });

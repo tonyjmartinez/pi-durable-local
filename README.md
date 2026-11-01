@@ -182,7 +182,8 @@ Each iteration orients to memory, Git status, open PRs, CI and prior notes, then
 Loops share a few slots. When a loop's gate says wake, it still waits for its turn:
 
 - At most `loops.maxConcurrent` iterations run at once.
-- With `loops.pace`, a loop waits while the last hour's pi spend is over `dailyBudgetUsd / 24 x paceBurst`, so the day's budget is spread across the day instead of being used up in a burst.
+- With `loops.pace`, a loop waits while the last `paceWindowHours` (default 3) of pi spend is over `dailyBudgetUsd / 24 x paceWindowHours x paceBurst`, so the day's budget is spread across the day instead of being used up in a burst. A 3-hour window means one expensive iteration does not block the next hour.
+- A loop waiting on the daily cap looks again within the hour. `pd brief` opens with a BUDGET line: the 24h spend against the cap, the pacing window against its allowance, and how many loops are running or waiting.
 - Among waiting loops, the highest priority goes first (1 urgent .. 5 idle), then whoever has waited longest. A loop without its own priority gets one by kind: requests and budget-review 2, product and design 3, maintenance 4.
 
 Waiting costs no model call; the loop looks again every 10 minutes.
@@ -300,8 +301,9 @@ The allowlist is empty by default, which means nothing auto-merges anywhere: PRs
 | `loops.defaultBudgetUsd` | `100` | Per-loop spend cap |
 | `loops.dailyBudgetUsd` | `1` | Shared cap on all pi sessions' spend in any 24 hours, inside loops or not (the daemon samples session totals every 5 min); loops wait when it is reached |
 | `loops.maxConcurrent` | unset (no limit) | At most this many loop iterations run at once; the rest queue by priority |
-| `loops.pace` | `false` | Spread the daily cap over the day: wait while the last hour spent more than `dailyBudgetUsd / 24 x paceBurst` |
-| `loops.paceBurst` | `2` | How far over the even hourly rate one hour may go |
+| `loops.pace` | `false` | Spread the daily cap over the day: wait while the pacing window spent more than its share |
+| `loops.paceWindowHours` | `3` | Hours the pacing allowance covers: `dailyBudgetUsd / 24 x hours x paceBurst` |
+| `loops.paceBurst` | `2` | How far over the even rate one pacing window may go |
 | `loops.maintenanceModel` | unset | Model for friction-sweep, ci-health, code-quality and cleanup iterations (e.g. Haiku); the session's model is restored after |
 | `loops.defaultIntervalMinutes` | `30` | Time between iterations (half an hour) |
 | `loops.defaultMaxIterations` | `17520` | Iteration cap (one year at the default cadence) |

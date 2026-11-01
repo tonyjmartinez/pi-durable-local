@@ -1,6 +1,8 @@
 // pdd: the one process that owns the pi-durable store. Every session, loop, and memory lives here; clients talk to it
 // over a Unix socket (HTTP + NDJSON event streams).
 import { execFile } from "node:child_process";
+import { queueOrder } from "./queue.ts";
+import { budgetStatus } from "./spend.ts";
 import { existsSync, statSync, unlinkSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -200,8 +202,26 @@ async function status() {
 		const agent = conversation === undefined ? undefined : await conversation.agent(context);
 		rows.push({ name, cwd: info.cwd, purpose: info.purpose, busy: busy.has(info.conversationId), cost, model: agent?.model === undefined ? undefined : `${agent.model.provider}/${agent.model.modelId}` });
 	}
-	const loops = Object.values((await harness.snapshot(Loops, context))?.byId ?? {});
-	return { sessions: rows, loops, parked, usage: await harness.usage(context), keys: { anthropic: Boolean(process.env.ANTHROPIC_API_KEY) } };
+	const loopsDoc = await harness.snapshot(Loops, context);
+	const loops = Object.values(loopsDoc?.byId ?? {});
+	const policy = loadPolicy();
+	const now = Date.now();
+	const queue = queueOrder(loops, now);
+	const budget = {
+		...budgetStatus({
+			loops,
+			...(loopsDoc?.factorySpend ? { samples: loopsDoc.factorySpend } : {}),
+			now,
+			capUsd: policy.loops.dailyBudgetUsd,
+			...(policy.loops.dailyBudgetSince !== undefined ? { since: policy.loops.dailyBudgetSince } : {}),
+			...(policy.loops.pace !== undefined ? { pace: policy.loops.pace } : {}),
+			...(policy.loops.paceBurst !== undefined ? { paceBurst: policy.loops.paceBurst } : {}),
+			...(policy.loops.paceWindowHours !== undefined ? { paceWindowHours: policy.loops.paceWindowHours } : {}),
+		}),
+		running: queue.filter((entry) => entry.state === "running").length,
+		waiting: queue.filter((entry) => entry.state === "waiting").length,
+	};
+	return { sessions: rows, loops, parked, budget, usage: await harness.usage(context), keys: { anthropic: Boolean(process.env.ANTHROPIC_API_KEY) } };
 }
 
 /**

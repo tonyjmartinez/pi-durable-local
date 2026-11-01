@@ -95,3 +95,41 @@ export function totalSpendInWindow(samples: readonly TotalSample[] | undefined, 
 	if (baseline === undefined || !Number.isFinite(total)) return 0;
 	return Math.max(0, total - baseline.total);
 }
+
+/** The factory's budget at a glance: the rolling day against the cap, and the pacing window against its allowance. */
+export type BudgetStatus = {
+	capUsd: number;
+	/** Last 24h, all pi sessions (the larger of loop charges and session-total samples), counted from `since`. */
+	daySpend: number;
+	/** Loop charges alone over the same day, which age out on a known schedule. */
+	loopDaySpend: number;
+	exceeded: boolean;
+	/** Undefined when pacing is off or there is no cap. */
+	pace?: { windowHours: number; spent: number; allowance: number };
+};
+
+export function budgetStatus(input: {
+	loops: readonly SpendingLoop[];
+	samples?: readonly TotalSample[];
+	now: number;
+	capUsd: number;
+	since?: number;
+	pace?: boolean;
+	paceBurst?: number;
+	paceWindowHours?: number;
+}): BudgetStatus {
+	const since = Number.isFinite(input.since) ? input.since! : 0;
+	const loops = input.loops.map((loop) => ({ ...loop, spendLog: loop.spendLog?.filter((entry) => entry.at >= since) }));
+	const latest = input.samples?.[input.samples.length - 1];
+	const spentIn = (windowMs: number) =>
+		Math.max(dailySpend(loops, input.now, windowMs), latest === undefined ? 0 : totalSpendInWindow(input.samples, latest.total, input.now, since, windowMs));
+	const capped = Number.isFinite(input.capUsd) && input.capUsd > 0;
+	const daySpend = spentIn(DAY_MS);
+	const status: BudgetStatus = { capUsd: input.capUsd, daySpend, loopDaySpend: dailySpend(loops, input.now), exceeded: capped && daySpend >= input.capUsd };
+	if (input.pace && capped) {
+		const windowHours = Number.isFinite(input.paceWindowHours) && input.paceWindowHours! > 0 ? Math.min(input.paceWindowHours!, 24) : 3;
+		const burst = Number.isFinite(input.paceBurst) && input.paceBurst! > 0 ? input.paceBurst! : 2;
+		status.pace = { windowHours, spent: spentIn(windowHours * 60 * 60_000), allowance: (input.capUsd / 24) * windowHours * burst };
+	}
+	return status;
+}

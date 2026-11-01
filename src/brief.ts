@@ -21,6 +21,8 @@ export type BriefInput = {
 	directions?: PivotDirection[];
 	/** Open issues labelled `proposal`. */
 	proposals?: BriefProposal[];
+	/** The factory budget (see budgetStatus) plus the loop queue's counts. */
+	budget?: { capUsd: number; daySpend: number; exceeded: boolean; pace?: { windowHours: number; spent: number; allowance: number }; running: number; waiting: number };
 };
 
 export type ParkedPr = { key: string; repo: string; pr: number; sha: string; reason: string; review?: string; at: string };
@@ -54,6 +56,13 @@ function pushAsk(lines: string[], loop: BriefLoop): void {
 }
 
 const clip = (text: string, length: number) => (text.length <= length ? text : `${text.slice(0, length - 1)}…`);
+
+/** One line: the rolling day against the cap, the pacing window against its allowance, and the queue. */
+export function budgetLine(b: NonNullable<BriefInput["budget"]>): string {
+	const day = b.capUsd > 0 ? `$${b.daySpend.toFixed(2)} of $${b.capUsd} cap in 24h (${Math.round((b.daySpend / b.capUsd) * 100)}%${b.exceeded ? ", waiting for room" : ""})` : `$${b.daySpend.toFixed(2)} in 24h, no cap`;
+	const pace = b.pace ? `; last ${b.pace.windowHours}h $${b.pace.spent.toFixed(2)} of $${b.pace.allowance.toFixed(2)} pace` : "";
+	return `BUDGET: ${day}${pace}; ${b.running} running, ${b.waiting} waiting for a turn`;
+}
 
 export function buildBrief(input: BriefInput): string {
 	const lines: string[] = [];
@@ -95,6 +104,8 @@ export function buildBrief(input: BriefInput): string {
 	const recent = input.audit.filter((entry) => Date.parse(entry.at) >= since);
 	const merged = recent.filter((entry) => entry.event === "merged");
 	lines.push("", `LAST 24H: ${merged.length} merged${merged.length ? ` (${merged.map((m) => `${m.repo}#${m.pr}`).join(", ")})` : ""}`);
+
+	if (input.budget !== undefined) lines.push("", budgetLine(input.budget));
 
 	const active = input.loops.filter((loop) => loop.status === "active");
 	lines.push("", `WORKFORCE: ${input.sessions.filter((s) => s.busy).length}/${input.sessions.length} sessions busy, ${active.filter((l) => !l.dormant).length} loops working, ${active.filter((l) => l.dormant).length} dormant`);

@@ -67,6 +67,8 @@ export type TurnInput = {
 	hourSpend: number;
 	/** Undefined: no pacing. */
 	hourAllowance?: number;
+	/** The pacing window `hourSpend` and `hourAllowance` cover. Default 1. */
+	paceWindowHours?: number;
 };
 
 export type Turn = { start: true } | { start: false; reason: string };
@@ -84,7 +86,8 @@ export function takeTurn(input: TurnInput): Turn {
 		return { start: false, reason: `queued: ${running.length} of ${input.maxConcurrent} slots busy (${running.map((other) => other.id).join(", ")})` };
 	}
 	if (input.hourAllowance !== undefined && input.hourAllowance > 0 && input.hourSpend >= input.hourAllowance) {
-		return { start: false, reason: `queued: pacing, $${input.hourSpend.toFixed(2)} spent in the last hour (allowance $${input.hourAllowance.toFixed(2)})` };
+		const window = input.paceWindowHours === undefined || input.paceWindowHours === 1 ? "hour" : `${input.paceWindowHours}h`;
+		return { start: false, reason: `queued: pacing, $${input.hourSpend.toFixed(2)} spent in the last ${window} (allowance $${input.hourAllowance.toFixed(2)})` };
 	}
 	const me = { ...loop, waitingSince: loop.waitingSince ?? now };
 	const ahead = others

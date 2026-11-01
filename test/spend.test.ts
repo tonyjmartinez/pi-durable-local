@@ -163,3 +163,23 @@ describe("factory-wide spend from session totals", () => {
 		assert.equal(totalSpendInWindow(undefined, 9, 0), 0);
 	});
 });
+
+describe("budgetStatus", () => {
+	const h = 60 * 60_000;
+	it("summarises the day against the cap and the pacing window against its allowance", async () => {
+		const { budgetStatus } = await import("../src/spend.ts");
+		const now = 10 * DAY_MS;
+		const loops = [{ id: "L1", spendLog: [{ at: now - 20 * h, usd: 4 }, { at: now - 2 * h, usd: 1 }, { at: now - 30 * 60_000, usd: 0.5 }] }];
+		const b = budgetStatus({ loops, now, capUsd: 10, pace: true, paceBurst: 1 });
+		assert.equal(b.daySpend, 5.5);
+		assert.equal(b.exceeded, false);
+		assert.deepEqual(b.pace, { windowHours: 3, spent: 1.5, allowance: 1.25 });
+		const since = budgetStatus({ loops, now, capUsd: 10, since: now - 3 * h });
+		assert.equal(since.daySpend, 1.5, "charges before `since` are not counted");
+		assert.equal(since.pace, undefined, "no pacing unless asked");
+		assert.equal(budgetStatus({ loops, now, capUsd: 0, pace: true }).pace, undefined, "no cap, no pacing");
+		const samples = [{ at: now - 25 * h, total: 10 }, { at: now - 5 * 60_000, total: 22 }];
+		assert.equal(budgetStatus({ loops, samples, now, capUsd: 10 }).daySpend, 12, "session totals count spend outside loops");
+		assert.equal(budgetStatus({ loops, samples, now, capUsd: 10 }).exceeded, true);
+	});
+});

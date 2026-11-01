@@ -1211,11 +1211,41 @@ describe("loops take turns", () => {
 	});
 
 	it("waits while pacing says the hour's allowance is used", async () => {
-		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 24, pace: true, paceBurst: 1 } }));
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 24, pace: true, paceBurst: 1, paceWindowHours: 1 } }));
 		store.seed(Loops, { byId: { L1: baseLoop({ spendLog: [{ at: Date.now() - 10 * 60_000, usd: 1.5 }] }) }, nextId: 2 });
 		setup({ loop: null, remote: null });
 		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
 		assert.equal(submits.length, 0);
 		assert.match(loopDoc()!.note, /pacing, \$1\.50 spent in the last hour \(allowance \$1\.00\)/);
+	});
+});
+
+describe("pacing over a 3-hour window", () => {
+	it("lets one big iteration through without blocking the next hour, and waits once the window is used", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 24, pace: true, paceBurst: 1 } }));
+		store.seed(Loops, { byId: { L1: baseLoop({ spendLog: [{ at: Date.now() - 10 * 60_000, usd: 1.5 }] }) }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:0"], "$1.50 of a $3 3h allowance");
+	});
+	it("waits when the 3h window is spent", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 24, pace: true, paceBurst: 1 } }));
+		store.seed(Loops, { byId: { L1: baseLoop({ spendLog: [{ at: Date.now() - 150 * 60_000, usd: 2 }, { at: Date.now() - 10 * 60_000, usd: 1.2 }] }) }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.equal(submits.length, 0);
+		assert.match(loopDoc()!.note, /pacing, \$3\.20 spent in the last 3h \(allowance \$3\.00\)/);
+	});
+});
+
+describe("waiting on the daily cap", () => {
+	it("looks again within the hour, not when the oldest charge ages out", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 1 } }));
+		store.seed(Loops, { byId: { L1: baseLoop({ spendLog: [{ at: Date.now() - 60 * 60_000, usd: 5 }] }) }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.equal(submits.length, 0);
+		const wait = loopDoc()!.nextRunAt! - Date.now();
+		assert.ok(wait <= 60 * 60_000 + 1000 && wait > 50 * 60_000, `rechecks in about an hour, not 23h (got ${Math.round(wait / 60_000)}m)`);
 	});
 });
