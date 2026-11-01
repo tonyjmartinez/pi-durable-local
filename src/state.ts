@@ -75,6 +75,8 @@ export type Loop = {
 	spendLog?: { at: number; usd: number }[];
 	/** How the loop gate decides to wake it; see LoopKind in loopgate.ts. Default goal. */
 	kind?: "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "strategy";
+	/** strategy: indices of the lenses the last runs used (newest last), so the rotation is deterministic. */
+	lensHistory?: number[];
 	/** ci-health: the CI finding the last completed iteration was woken for. */
 	lastCiKey?: string;
 	skipIfIdleHours?: number;

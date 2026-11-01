@@ -61,7 +61,7 @@ export type GateRepo = {
 	/** ci-health: undefined when the runs could not be read. */
 	ci?: GateCi;
 	/** strategy: facts the strategist's wake rule needs (see strategist.ts). */
-	strategist?: Omit<StrategistSignals, "hoursSinceLastRun" | "newMerges">;
+	strategist?: Omit<StrategistSignals, "hoursSinceLastRun" | "newMerges" | "lastRunAt">;
 };
 
 export type WakeDecision = { wake: boolean; reason: string; nextCheckMinutes?: number };
@@ -172,8 +172,8 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 	if (kind === "strategy") {
 		const changed = repo.lastSeenBaseSha !== undefined ? repo.lastSeenBaseSha !== repo.baseHeadSha : loop.lastRunAt === undefined || repo.baseHeadCommittedAt > loop.lastRunAt;
 		return strategistWake({
-			productLoopIdle: false,
 			...repo.strategist,
+			...(loop.lastRunAt !== undefined ? { lastRunAt: loop.lastRunAt } : {}),
 			newMerges: changed,
 			...(loop.lastRunAt !== undefined ? { hoursSinceLastRun: (now - loop.lastRunAt) / HOUR } : {}),
 		});
