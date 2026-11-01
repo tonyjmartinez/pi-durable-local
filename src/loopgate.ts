@@ -3,13 +3,14 @@
 // (https://github.com/kentcdodds/kcd-skills, MIT). All times are epoch milliseconds.
 
 import { BUDGET_REVIEW_PROMPT, DEVILS_ADVOCATE_PROMPT } from "./devil.ts";
+import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } from "./strategist.ts";
 
 /**
  * goal: always wakes. cleanup: skips when the base branch is idle. friction-sweep: skips with no open friction.
  * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
  * flaky base branch. design: wakes like goal, but is its own kind so a repo can run one product and one design loop.
  */
-export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review";
+export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "strategy";
 
 export type GateLoop = {
 	/** Default "goal". */
@@ -59,6 +60,8 @@ export type GateRepo = {
 	dailySpendShare?: number;
 	/** ci-health: undefined when the runs could not be read. */
 	ci?: GateCi;
+	/** strategy: facts the strategist's wake rule needs (see strategist.ts). */
+	strategist?: Omit<StrategistSignals, "hoursSinceLastRun" | "newMerges" | "lastRunAt">;
 };
 
 export type WakeDecision = { wake: boolean; reason: string; nextCheckMinutes?: number };
@@ -148,7 +151,7 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 
 	// Maintenance waits while product loops need the day's budget. A red base branch is the exception: it blocks
 	// every product PR anyway.
-	const maintenance = kind === "code-quality" || kind === "ci-health" || kind === "devils-advocate";
+	const maintenance = kind === "code-quality" || kind === "ci-health" || kind === "devils-advocate" || kind === "strategy";
 	const baseRed = kind === "ci-health" && repo.ci !== undefined && repo.ci.failing.length > 0;
 	if (maintenance && !baseRed && repo.dailySpendShare !== undefined && repo.dailySpendShare >= MAINTENANCE_SHARE_OF_DAILY) {
 		return { wake: false, reason: `today's spend is ${Math.round(repo.dailySpendShare * 100)}% of the daily cap; product loops go first`, nextCheckMinutes: IDLE_RECHECK_MINUTES };
@@ -164,6 +167,16 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 			repo.ci.flaky.length > 0 ? `flaky: ${repo.ci.flaky.join(", ")}` : undefined,
 		].filter(Boolean);
 		return { wake: true, reason: `base branch CI ${parts.join("; ")}` };
+	}
+
+	if (kind === "strategy") {
+		const changed = repo.lastSeenBaseSha !== undefined ? repo.lastSeenBaseSha !== repo.baseHeadSha : loop.lastRunAt === undefined || repo.baseHeadCommittedAt > loop.lastRunAt;
+		return strategistWake({
+			...repo.strategist,
+			...(loop.lastRunAt !== undefined ? { lastRunAt: loop.lastRunAt } : {}),
+			newMerges: changed,
+			...(loop.lastRunAt !== undefined ? { hoursSinceLastRun: (now - loop.lastRunAt) / HOUR } : {}),
+		});
 	}
 
 	if (kind === "code-quality" && repo.productLoopActive === true) {
@@ -290,7 +303,7 @@ export const DESIGN_POLISH_PROMPT = [
 	"Leave product copy, features and information architecture to the product loop. Do not add fonts, image assets from outside the repo, or dependencies. Name the branch pd/design-<slug> and declare Touches: <area> so it composes with the product loop's PRs; if a product PR is open on the same files, pick another area.",
 ].join("\n");
 
-export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review";
+export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review" | "product-strategist";
 
 export const PRODUCT_GARDENER_PROMPT = [
 	"Incrementally improve this repository for its users. Act as the product-minded maintainer, not just a ticket taker.",
@@ -307,6 +320,7 @@ export const LOOP_PROMPTS: Record<LoopPreset, string> = {
 	"design-polish": DESIGN_POLISH_PROMPT,
 	"devils-advocate": DEVILS_ADVOCATE_PROMPT,
 	"budget-review": BUDGET_REVIEW_PROMPT,
+	"product-strategist": PRODUCT_STRATEGIST_PROMPT,
 };
 
 export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
@@ -316,4 +330,5 @@ export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
 	"devils-advocate": { kind: "devils-advocate", intervalMinutes: 6 * 60, budgetUsd: 3 },
 	// Runs on a schedule whatever the repo does, and is not held back near the cap: that is when it matters most.
 	"budget-review": { kind: "budget-review", intervalMinutes: 4 * 60, budgetUsd: 5 },
+	"product-strategist": { kind: "strategy", intervalMinutes: 60, budgetUsd: 10 },
 };
