@@ -432,7 +432,10 @@ const routes: [string, RegExp, Route][] = [
 				const loop = (await tx.doc(Loops)).byId[id]!;
 				// A harness-level commit has no conversation of its own: the loop's task lives in its session's conversation.
 				const conversationId = sessions[loop.session]?.conversationId;
-				if (conversationId === undefined) continue;
+				if (conversationId === undefined) {
+					audit("direction_wake_skipped", { repo: key, loop: id, reason: `session ${loop.session} is gone` });
+					continue;
+				}
 				if (loop.taskId !== undefined) replaced.push(loop.taskId);
 				loop.taskId = await tx.createTask(LoopTask, { loopId: id }, { ownership: { kind: "conversation" }, background: true, conversationId: conversationId as never });
 				woken.push(id);
