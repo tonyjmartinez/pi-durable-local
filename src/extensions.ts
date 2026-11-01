@@ -2,6 +2,7 @@
 // the gated PR merge, project loops, and the safety guard.
 import { appendChat, makeMessage, readChat } from "./chat.ts";
 import { buildEvidence } from "./devil.ts";
+import { countUnchecked } from "./strategist.ts";
 import { auditTail } from "./ops.ts";
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
@@ -1503,6 +1504,15 @@ export function productLoopActive(loop: Pick<Loop, "id" | "session">, extras: Pi
 		other.id !== loop.id && other.status === "active" && other.dormant === undefined && ["goal", "design"].includes(other.kind ?? "goal") && repoOf(other.session) === mine);
 }
 
+/** The repo's product loop (goal) is asleep or said it was idle: the strategist's cue to supply ideas. */
+export function productLoopIdle(loop: Pick<Loop, "id" | "session">, extras: Pick<GateExtras, "allLoops" | "sessions">): boolean {
+	const repoOf = (name: string) => githubRepoOf(extras.sessions[name]?.remote);
+	const mine = repoOf(loop.session);
+	if (mine === undefined) return false;
+	return extras.allLoops.some((other) =>
+		other.id !== loop.id && other.status === "active" && (other.kind ?? "goal") === "goal" && repoOf(other.session) === mine && (other.dormant !== undefined || other.idleReported === true));
+}
+
 /** What the loop gate needs, from GitHub via the daemon's gh: no model call, a handful of API requests. */
 async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, context: Context, extras?: GateExtras): Promise<GateRepo | undefined> {
 	const repo = githubRepoOf(session.remote);
@@ -1531,6 +1541,15 @@ async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, conte
 			.then((out) => summarizeRuns(JSON.parse(out)))
 			.catch(() => undefined)
 		: undefined;
+	// The strategist's roadmap signal: unchecked ROADMAP.md items that no open agent PR is already working on.
+	const strategist = loop.kind === "strategy"
+		? {
+			productLoopIdle: extras !== undefined && productLoopIdle(loop, extras),
+			...(await gh(["api", `repos/${repo}/contents/ROADMAP.md?ref=${base}`, "-H", "Accept: application/vnd.github.raw"], context)
+				.then((text) => ({ roadmapUnclaimed: Math.max(0, countUnchecked(text) - openAgentPrs.length) }))
+				.catch(() => ({}))),
+		}
+		: undefined;
 	return {
 		baseHeadSha: head.sha,
 		baseHeadCommittedAt: Date.parse(head.at),
@@ -1541,6 +1560,7 @@ async function gateFacts(loop: Loop, session: SessionInfo, policy: Policy, conte
 		...(loop.kind === "code-quality" && extras !== undefined ? { productLoopActive: productLoopActive(loop, extras) } : {}),
 		...(extras?.dailySpendShare !== undefined ? { dailySpendShare: extras.dailySpendShare } : {}),
 		...(ci !== undefined ? { ci } : {}),
+		...(strategist !== undefined ? { strategist } : {}),
 	};
 }
 
