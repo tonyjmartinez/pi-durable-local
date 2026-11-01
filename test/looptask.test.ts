@@ -691,6 +691,39 @@ describe("await phase", () => {
 const entry = (kind: string) => ({ kind });
 const setPolicy = (loops: Record<string, unknown>) => writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops }));
 
+describe("scanForLastInput", () => {
+	// A fake conversation, newest first, paged by index.
+	const pager = (kinds: string[]) => async (limit: number, cursor: number | undefined) => {
+		const start = cursor ?? 0;
+		const items = kinds.slice(start, start + limit).map(entry);
+		return { items, next: start + limit < kinds.length ? start + limit : undefined };
+	};
+	const own = (n: number) => Array.from({ length: n }, () => "pi.assistant");
+
+	it("pages past a long iteration to the loop's own tick, so the loop resets", async () => {
+		const scan = await ext.scanForLastInput(pager([...own(120), "pdl.loop-tick", ...own(10)]));
+		assert.equal(scan.settled, true);
+		assert.equal(ext.mayResetForLoop(scan.items, Number.POSITIVE_INFINITY), true);
+	});
+
+	it("still finds a person's message behind a long task, so the loop does not reset", async () => {
+		const scan = await ext.scanForLastInput(pager([...own(120), "pi.user", "pdl.loop-tick"]));
+		assert.equal(scan.settled, true);
+		assert.equal(ext.mayResetForLoop(scan.items, Number.POSITIVE_INFINITY), false);
+	});
+
+	it("is settled at the start of the history", async () => {
+		const scan = await ext.scanForLastInput(pager(own(70)));
+		assert.deepEqual([scan.items.length, scan.settled], [70, true]);
+	});
+
+	it("gives up (unsettled, no reset) past the scan limit", async () => {
+		const scan = await ext.scanForLastInput(pager([...own(300), "pdl.loop-tick"]), 50, 200);
+		assert.equal(scan.settled, false);
+		assert.equal(ext.mayResetForLoop(scan.items, scan.items.length), false);
+	});
+});
+
 describe("mayResetForLoop", () => {
 	const may = (...kinds: string[]) => ext.mayResetForLoop(kinds.map(entry));
 
