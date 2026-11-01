@@ -33,6 +33,7 @@ export function priorityOf(loop: Pick<QueueLoop, "priority" | "kind">): Priority
 		case "code-quality":
 		case "cleanup":
 		case "devils-advocate":
+		case "business-review":
 		case "strategy":
 			return 4;
 		default:

@@ -2,7 +2,7 @@
 // The cleanup schedule and the "skip if no commits in 24h" rule follow Kent C. Dodds's autopilot cleanup automations
 // (https://github.com/kentcdodds/kcd-skills, MIT). All times are epoch milliseconds.
 
-import { BUDGET_REVIEW_PROMPT, DEVILS_ADVOCATE_PROMPT } from "./devil.ts";
+import { BUDGET_REVIEW_PROMPT, BUSINESS_REVIEW_PROMPT, DEVILS_ADVOCATE_PROMPT } from "./devil.ts";
 import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } from "./strategist.ts";
 
 /**
@@ -10,7 +10,7 @@ import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } fro
  * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
  * flaky base branch. design: wakes like goal, but is its own kind so a repo can run one product and one design loop.
  */
-export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "strategy" | "request";
+export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "business-review" | "strategy" | "request";
 
 export type GateLoop = {
 	/** Default "goal". */
@@ -141,6 +141,14 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 
 	// The budget reviewer reads factory-wide spend, not this repo: it wakes on its schedule.
 	if (kind === "budget-review") return { wake: true, reason: "scheduled budget review" };
+
+	// The business reviewer also wakes on its schedule and never goes dormant, but it yields near the daily cap.
+	if (kind === "business-review") {
+		if (repo.dailySpendShare !== undefined && repo.dailySpendShare >= MAINTENANCE_SHARE_OF_DAILY) {
+			return { wake: false, reason: `today's spend is ${Math.round(repo.dailySpendShare * 100)}% of the daily cap; product loops go first`, nextCheckMinutes: IDLE_RECHECK_MINUTES };
+		}
+		return { wake: true, reason: "scheduled business review" };
+	}
 
 	// A dormant loop said (or showed) it had nothing left to do. It sleeps until the repo changes under it.
 	if (loop.dormant !== undefined) {
@@ -304,7 +312,7 @@ export const DESIGN_POLISH_PROMPT = [
 	"Leave product copy, features and information architecture to the product loop. Do not add fonts, image assets from outside the repo, or dependencies. Name the branch pd/design-<slug> and declare Touches: <area> so it composes with the product loop's PRs; if a product PR is open on the same files, pick another area.",
 ].join("\n");
 
-export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review" | "product-strategist";
+export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review" | "business-review" | "product-strategist";
 
 export const PRODUCT_GARDENER_PROMPT = [
 	"Incrementally improve this repository for its users. Act as the product-minded maintainer, not just a ticket taker.",
@@ -322,6 +330,7 @@ export const LOOP_PROMPTS: Record<LoopPreset, string> = {
 	"design-polish": DESIGN_POLISH_PROMPT,
 	"devils-advocate": DEVILS_ADVOCATE_PROMPT,
 	"budget-review": BUDGET_REVIEW_PROMPT,
+	"business-review": BUSINESS_REVIEW_PROMPT,
 	"product-strategist": PRODUCT_STRATEGIST_PROMPT,
 };
 
@@ -332,5 +341,6 @@ export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
 	"devils-advocate": { kind: "devils-advocate", intervalMinutes: 6 * 60, budgetUsd: 3 },
 	// Runs on a schedule whatever the repo does, and is not held back near the cap: that is when it matters most.
 	"budget-review": { kind: "budget-review", intervalMinutes: 4 * 60, budgetUsd: 5 },
+	"business-review": { kind: "business-review", intervalMinutes: 24 * 60, budgetUsd: 3 },
 	"product-strategist": { kind: "strategy", intervalMinutes: 60, budgetUsd: 10 },
 };
