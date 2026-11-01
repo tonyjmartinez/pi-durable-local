@@ -1327,3 +1327,22 @@ describe("resetDecision", () => {
 		assert.equal(ext.resetDecision([e("pi.assistant"), e("pdl.loop-tick")], true).reset, true);
 	});
 });
+
+describe("deferred tools", () => {
+	const DEFERRED = ["web_search", "web_fetch", "memory_forget", "sessions_list", "session_send", "issue_view", "issue_close", "pr_edit", "pr_merge", "friction_file"];
+	const all = () => [ext.Memory_, ext.Sessions_, ext.Web_, ext.Git_, ext.Loops_, ext.Subagent_].flatMap((e) => (e as { tools?: { name: string; deferred?: boolean }[] }).tools ?? []);
+
+	it("defers exactly the rarely used tools, and never the ones every loop needs", () => {
+		const deferred = all().filter((t) => t.deferred).map((t) => t.name).sort();
+		assert.deepEqual(deferred, [...DEFERRED].sort());
+		for (const needed of ["loop_report", "pr_tick", "pr_create", "git_sync", "git_push", "pr_status", "memory_save", "memory_search", "subagent", "factory_evidence"]) {
+			assert.equal(all().find((t) => t.name === needed)?.deferred, undefined, needed);
+		}
+	});
+
+	it("tells the model to load deferred tools with tool_search", async () => {
+		const { loadPolicy } = await import("../src/config.ts");
+		assert.ok(loadPolicy());
+		assert.match(ext.WORKFLOW_TEXT, /deferred: load one with tool_search first/);
+	});
+});
