@@ -12,25 +12,43 @@ export PATH="$HOME/.local/bin:$PATH"
 umask 077
 mkdir -p "$DATA"
 
+# Supervisor loops are found by process (argv0 marker + this data dir's log path), not only the pidfile,
+# because a second pdd-up used to overwrite the pidfile and orphan the first loop.
+supervisors() { pgrep -f -- "pdd-up-supervisor .*${LOG}\$" || true; }
+
 if [[ "${1:-}" == "stop" ]]; then
-	[[ -f "$PIDFILE" ]] && kill -TERM -- "-$(cat "$PIDFILE")" 2>/dev/null && echo "pdd stopped" || echo "pdd was not running"
+	found=0
+	for pid in $(supervisors) $([[ -f "$PIDFILE" ]] && cat "$PIDFILE" || true); do
+		# setsid made each loop a process-group leader: signal the group so its daemon goes too.
+		if kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; then found=1; fi
+	done
 	rm -f "$PIDFILE"
+	[[ $found == 1 ]] && echo "pdd stopped" || echo "pdd was not running"
 	exit 0
 fi
 
-if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-	echo "pdd already running (pid $(cat "$PIDFILE"))"
+running="$(supervisors | head -1)"
+if [[ -n "$running" ]]; then
+	echo "pdd already running (supervisor pid $running)"
+	echo "$running" >"$PIDFILE"
 	exit 0
 fi
 
 # setsid gives the loop its own process group, so `pdd-up stop` takes down the loop and the daemon together.
+# The loop traps TERM so it exits at once, even while sleeping.
 setsid bash -c '
 	cd "$1"
+	child=
+	trap '"'"'[[ -n "$child" ]] && kill -TERM "$child" 2>/dev/null; exit 0'"'"' TERM INT
 	while true; do
-		"$2" --no-warnings src/daemon.ts >>"$3" 2>&1 || true
+		"$2" --no-warnings src/daemon.ts >>"$3" 2>&1 &
+		child=$!
+		wait "$child" || true
 		echo "$(date -Is) pdd exited; restarting in 5s" >>"$3"
-		sleep 5
+		child=
+		sleep 5 &
+		wait $! || true
 	done
-' pdd-up "$ROOT" "$NODE" "$LOG" </dev/null >/dev/null 2>&1 &
+' pdd-up-supervisor "$ROOT" "$NODE" "$LOG" </dev/null >/dev/null 2>&1 &
 echo $! >"$PIDFILE"
 echo "pdd started (pid $!, log $LOG)"
