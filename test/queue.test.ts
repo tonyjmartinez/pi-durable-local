@@ -12,6 +12,7 @@ describe("priority", () => {
 	it("defaults by kind: requests and the budget check first, maintenance last", () => {
 		assert.equal(priorityOf({ kind: "request" }), 2);
 		assert.equal(priorityOf({ kind: "budget-review" }), 2);
+		assert.equal(priorityOf({ kind: "business-review" }), 4);
 		assert.equal(priorityOf({}), 3);
 		assert.equal(priorityOf({ kind: "design" }), 3);
 		assert.equal(priorityOf({ kind: "ci-health" }), 4);

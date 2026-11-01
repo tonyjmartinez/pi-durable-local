@@ -59,7 +59,7 @@ pd ui [--rotate]                          local web UI on 127.0.0.1:7777 (PD_UI_
 pd tmux [names...]                        tmux session "pd": status window plus one window per session
 
 pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
-pd loop start <session> --preset product-gardener|design-polish|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep|code-quality|ci-health|devils-advocate|budget-review
+pd loop start <session> --preset product-gardener|design-polish|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep|code-quality|ci-health|devils-advocate|budget-review|business-review
 pd loop ls | pause <id> | resume <id> | stop <id>
 pd loop set <id> [--every 30] [--max 17520] [--budget 100]
 
@@ -184,7 +184,7 @@ Loops share a few slots. When a loop's gate says wake, it still waits for its tu
 - At most `loops.maxConcurrent` iterations run at once.
 - With `loops.pace`, a loop waits while the last `paceWindowHours` (default 3) of pi spend is over `dailyBudgetUsd / 24 x paceWindowHours x paceBurst`, so the day's budget is spread across the day instead of being used up in a burst. A 3-hour window means one expensive iteration does not block the next hour.
 - A loop waiting on the daily cap looks again within the hour. `pd brief` opens with a BUDGET line: the 24h spend against the cap, the pacing window against its allowance, and how many loops are running or waiting.
-- Among waiting loops, the highest priority goes first (1 urgent .. 5 idle), then whoever has waited longest. A loop without its own priority gets one by kind: requests and budget-review 2, product and design 3, maintenance 4.
+- Among waiting loops, the highest priority goes first (1 urgent .. 5 idle), then whoever has waited longest. A loop without its own priority gets one by kind: requests and budget-review 2, product and design 3, maintenance and business-review 4.
 
 Waiting costs no model call; the loop looks again every 10 minutes.
 
@@ -237,6 +237,7 @@ Before waking a model, the loop checks GitHub through the daemon's own `gh` (a h
 | `devils-advocate` | devils-advocate | every 6 hours | opens no PRs: a deliberately rude sceptic that rotates through the factory's process (gates, spend, loops, prompts, guardrails, coordination, docs, outcomes), reads a redacted digest of loops, audit log and chat with `factory_evidence`, and files at most two evidence-backed `friction` findings per run; $3 budget, yields to product loops like maintenance |
 
 | `budget-review` | budget-review | every 4 hours | opens no PRs: reads the last 24h of pi spend (inside and outside loops, by loop) from `factory_evidence`, judges output per dollar, files at most two `Budget: ` findings (needs-decision) or sends one short efficiency note to a session, and keeps a spend ledger in memory; never dormant and not held back near the cap; $5 budget |
+| `business-review` | business-review | daily | the factory's business owner: opens no PRs, edits no files. Reads 7 days of spend and merges from `factory_evidence`, scores each project on cost, market, path to money and time to first dollar, and ranks them (invest, maintain, pivot, pause). Acts on at most two items per run: a `Business: ` priority change or new-project pitch (needs-decision, one open pitch at a time) or a short note to a session. Never outward-facing; never dormant, but held back near the cap like maintenance; $3 budget |
 
 Run the devil's advocate on a session whose repo is the factory itself (a clone of pi-durable-local) so its findings land where they can be fixed: `pd loop start <session> --preset devils-advocate`. Its findings are titled `Devil's advocate: ...`; the tone is blunt by design, but it may not insult people and must quote evidence.
 

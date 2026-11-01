@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { buildEvidence, DEVIL_LENSES, DEVILS_ADVOCATE_PROMPT, EVIDENCE_MAX_CHARS } from "../src/devil.ts";
@@ -78,5 +79,23 @@ describe("budget-review preset", () => {
 		const repo = { openAgentPrs: [], openFrictionIssues: 0, baseHeadSha: "abc", baseHeadCommittedAt: NOW, dailySpendShare: 0.95 } as never;
 		const loop = { kind: "budget-review" as const, iteration: 3, lastRunAt: NOW - 1000, dormant: { fingerprint: "x", since: 0 } };
 		assert.equal(shouldWake({ loop, repo, now: NOW }).wake, true);
+	});
+});
+
+describe("business-review preset", () => {
+	const mk = (share?: number) => ({ openAgentPrs: [], openFrictionIssues: 0, baseHeadSha: "abc", baseHeadCommittedAt: NOW, dailySpendShare: share }) as never;
+	it("is daily, $3, with a prompt that reads factory_evidence and forbids outward action", () => {
+		assert.deepEqual(LOOP_SCHEDULE["business-review"], { kind: "business-review", intervalMinutes: 1440, budgetUsd: 3 });
+		assert.match(LOOP_PROMPTS["business-review"], /factory_evidence/);
+		assert.match(LOOP_PROMPTS["business-review"], /Business: /);
+	});
+	it("wakes on schedule even when dormant, but is held back near the cap", () => {
+		const loop = { kind: "business-review" as const, iteration: 3, lastRunAt: NOW - 1000, dormant: { fingerprint: "x", since: 0 } };
+		assert.equal(shouldWake({ loop, repo: mk(0.1), now: NOW }).wake, true);
+		assert.equal(shouldWake({ loop, repo: mk(0.95), now: NOW }).wake, false);
+	});
+	it("gates factory_evidence to business-review sessions", () => {
+		const src = readFileSync(new URL("../src/extensions.ts", import.meta.url), "utf8");
+		assert.match(src, /loop\.kind === "business-review"\) && loop\.status === "active"/);
 	});
 });

@@ -90,6 +90,10 @@ A portfolio-level preset (`venture`, one instance, not per repo) that proposes n
 - `pd brief` gets a PITCHES section. `pd pitch approve <slug>` is human/general-only. It runs `gh repo create tonyjmartinez/<slug> --private`, seeds it from the spike plus a first direction taken from the pitch (`pd direct`), then `pd factory` with the product-gardener and strategist presets. Agents never create repos. `pd pitch reject <slug> "why"` records taste.
 - Approving a pitch is a one-way, outward-facing action. It always waits for Tony.
 
+## business-review and the venture scout
+
+The `business-review` preset (daily, portfolio-level, priority 4) judges value and return across the whole portfolio and sets priorities: which projects deserve more of the daily cap, which to pause. It also files short new-project pitches (`Business: ` proposals, one open at a time) through the same proposal path. The venture scout generates and spikes pitches at volume; business-review decides which projects, existing or new, are worth the money already spent.
+
 ## Budget
 
 Ideation is cheap but must fit the $10/day cap. The strategist gets at most $0.60 per run, and strategist plus venture share at most 20% of the daily cap. Builders keep priority, as product loops do today.
