@@ -128,8 +128,12 @@ export function inbox(name: string, options: { file?: string; cursorFile?: strin
 	const index = cursor === undefined ? -1 : rows.findIndex((row) => row.id === cursor);
 	const fresh = rows.slice(index + 1);
 	if (!options.peek && rows.length > 0 && rows[rows.length - 1]?.id !== cursor) setCursor(name, rows[rows.length - 1]?.id ?? "", options.cursorFile);
-	return fresh.filter((row) => row.from !== name && (row.to === name || row.to === "all"));
+	const mine = fresh.filter((row) => row.from !== name && (row.to === name || row.to === "all"));
+	// A first call has no cursor: show only the latest few instead of the whole history.
+	return cursor === undefined ? mine.slice(-FIRST_INBOX) : mine;
 }
+
+const FIRST_INBOX = 10;
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -167,6 +171,7 @@ async function waitFor<T>(check: () => T[], file: string, timeoutSec: number, po
 
 /** Block until `name` has inbox messages; returns them (cursor advanced) or null on timeout. */
 export function waitInbox(name: string, options: { file?: string; cursorFile?: string; timeoutSec?: number; pollMs?: number } = {}): Promise<ChatMessage[] | null> {
+	if (NAME.test(name) && getCursor(name, options.cursorFile) === undefined) inbox(name, { ...options, peek: false }); // start from now
 	return waitFor(() => inbox(name, options), options.file ?? CHAT_LOG, options.timeoutSec ?? 600, options.pollMs ?? 1000);
 }
 

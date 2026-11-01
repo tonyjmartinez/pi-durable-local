@@ -126,4 +126,13 @@ describe("bridge", () => {
 		assert.deepEqual(whoChat({ file: f, cursorFile: join(dir, "none.json") }).map((w) => w.name), ["a"]);
 		assert.deepEqual(whoChat({ file: f, cursorFile: join(dir, "none.json"), now: Date.now() + 48 * 3600_000 }), []);
 	});
+	it("no cursor: inbox shows the last 10; wait starts from now", async () => {
+		const f = join(dir, "n.jsonl");
+		for (let i = 0; i < 15; i++) appendChat(mk("a", "all", `m${i}`), f);
+		const got = inbox("b", { file: f, cursorFile: join(dir, "n1.json") });
+		assert.deepEqual(got.map((m) => m.text), Array.from({ length: 10 }, (_, i) => `m${i + 5}`));
+		assert.equal(await waitInbox("c", { file: f, cursorFile: join(dir, "n2.json"), timeoutSec: 0.2, pollMs: 50 }), null);
+		setTimeout(() => appendChat(mk("a", "c", "new"), f), 100);
+		assert.equal((await waitInbox("c", { file: f, cursorFile: join(dir, "n2.json"), timeoutSec: 5, pollMs: 50 }))?.[0]?.text, "new");
+	});
 });
