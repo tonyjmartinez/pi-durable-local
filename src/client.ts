@@ -282,7 +282,7 @@ async function brief(): Promise<void> {
 			? (JSON.parse(out.stdout || "[]") as Json[]).map((i) => ({ repo: i.repository.nameWithOwner, number: i.number, title: i.title, createdAt: i.createdAt, defaultBy: /^Default by:\s*(\S+)/m.exec(i.body ?? "")?.[1] }))
 			: [];
 	});
-	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, proposals, directions: directions as never }));
+	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, proposals, directions: directions as never, ...(s.budget ? { budget: s.budget } : {}) }));
 }
 
 function printLoop(loop: Json): void {

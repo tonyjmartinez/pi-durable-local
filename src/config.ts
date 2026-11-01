@@ -52,8 +52,10 @@ export type Policy = {
 		maxConcurrent?: number;
 		/** Pace spend across the day: a loop waits while the last hour's spend is over dailyBudgetUsd / 24 x paceBurst. */
 		pace?: boolean;
-		/** How far over the even hourly rate one hour may go when pacing. Default 2. */
+		/** How far over the even rate one pacing window may go. Default 2. */
 		paceBurst?: number;
+		/** Hours the pacing allowance covers (dailyBudgetUsd / 24 x hours x paceBurst). Default 3, so one big iteration does not block the next hour. */
+		paceWindowHours?: number;
 		/** Model for routine maintenance loops (friction-sweep, ci-health, code-quality, cleanup). Unset = session model. */
 		maintenanceModel?: string;
 		/** Optional one-time budget start in epoch milliseconds; historical spend remains recorded. */
