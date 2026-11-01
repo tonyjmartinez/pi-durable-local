@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { redact } from "./redact.ts";
 
-export type NotifyType = "merged" | "parked" | "loop_blocked" | "budget_hit" | "tick_error";
+export type NotifyType = "merged" | "parked" | "loop_blocked" | "budget_hit" | "tick_error" | "proposal";
 
 export type NotifyEvent = {
 	type: NotifyType;
@@ -33,8 +33,9 @@ const TAGS: Record<NotifyType, string> = {
 	loop_blocked: "no_entry",
 	budget_hit: "moneybag",
 	tick_error: "rotating_light",
+	proposal: "bulb",
 };
-const PRIORITY: Record<NotifyType, string> = { merged: "low", parked: "default", loop_blocked: "high", budget_hit: "high", tick_error: "high" };
+const PRIORITY: Record<NotifyType, string> = { merged: "low", parked: "default", loop_blocked: "high", budget_hit: "high", tick_error: "high", proposal: "default" };
 
 export function detectTarget(url: string): NotifyTarget {
 	let host: string;

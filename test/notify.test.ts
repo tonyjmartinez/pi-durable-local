@@ -221,3 +221,12 @@ describe("rate limiting", () => {
 		assert.equal((await notify(event, options)).skipped, undefined);
 	});
 });
+
+import { notificationFor } from "../src/state.ts";
+describe("proposal notification", () => {
+	it("notifies once for a newly filed proposal, not for duplicates or plain friction", () => {
+		assert.equal(notificationFor("friction", { proposal: true, title: "x", repo: "o/r", url: "https://github.com/o/r/issues/1" })?.type, "proposal");
+		assert.equal(notificationFor("friction", { proposal: true, title: "x", repo: "o/r", duplicateOf: 1 }), undefined);
+		assert.equal(notificationFor("friction", { title: "x", url: "u" }), undefined);
+	});
+});

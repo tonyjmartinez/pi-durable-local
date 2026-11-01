@@ -204,3 +204,14 @@ describe("frictionFromAudit", () => {
 		assert.doesNotThrow(() => frictionFromAudit([{}, { event: "blocked" }, { event: "blocked", reason: 5 as unknown as string }], { now: NOW }));
 	});
 });
+
+describe("proposal issues", () => {
+	const base = { title: "t", whatHappened: "a", whatYouWanted: "b", howToReproduce: "c", cost: "d", priority: "P2" as const };
+	it("labels by flag, not by title", () => {
+		const issue = buildFrictionIssue({ ...base, title: "needs-decision: pick one", needsDecision: true });
+		assert.deepEqual(issue.labels, ["friction", "P2", "needs-decision"]);
+		const proposal = buildFrictionIssue({ ...base, proposal: true, defaultBy: "2026-11-02T00:00:00Z" });
+		assert.deepEqual(proposal.labels, ["friction", "P2", "needs-decision", "proposal"]);
+		assert.match(proposal.body, /^Default by: 2026-11-02T00:00:00Z$/m);
+	});
+});

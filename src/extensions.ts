@@ -1031,7 +1031,7 @@ export async function fileFriction(repo: string, input: FrictionInput, context: 
 		return { duplicateOf: duplicate };
 	}
 	for (const label of issue.labels) {
-		await gh(["label", "create", label, "--repo", repo, "--force", "--color", label === FRICTION_LABEL ? "d93f0b" : label === "needs-decision" ? "5319e7" : "fbca04"], context).catch(() => undefined);
+		await gh(["label", "create", label, "--repo", repo, "--force", "--color", label === FRICTION_LABEL ? "d93f0b" : label === "needs-decision" ? "5319e7" : label === "proposal" ? "0e8a16" : "fbca04"], context).catch(() => undefined);
 	}
 	const url = (await gh(["issue", "create", "--repo", repo, "--title", issue.title, "--body", issue.body, ...issue.labels.flatMap((l) => ["--label", l])], context)).trim();
 	return { url };
@@ -1223,7 +1223,9 @@ export const Git_ = defineExtension({
 				alreadyLooked: Type.Optional(Type.String()),
 				relevantFiles: Type.Optional(Type.Array(Type.String())),
 				priority: Type.Union([Type.Literal("P0"), Type.Literal("P1"), Type.Literal("P2"), Type.Literal("P3")]),
-				needsDecision: Type.Optional(Type.Boolean({ description: "True if a human must decide (product call, rule change)" })),
+				needsDecision: Type.Optional(Type.Boolean({ description: "True if a human must decide (product call, rule change). Applies the needs-decision label." })),
+				proposal: Type.Optional(Type.Boolean({ description: "Strategist proposal for a big bet: applies the proposal and needs-decision labels. Put options, recommendation and door in the fields." })),
+				defaultBy: Type.Optional(Type.String({ description: "ISO time a two-way proposal is adopted by default if unanswered (24h out)." })),
 			}),
 			execute: async (args, api, context) => {
 				const session = await sessionInfo(api, api.conversationId, context);
@@ -1232,7 +1234,7 @@ export const Git_ = defineExtension({
 				const { scope: _scope, ...input } = args;
 				try {
 					const result = await fileFriction(repo, input, context);
-					audit("friction", { session: session?.name, repo, ...result, title: args.title });
+					audit("friction", { session: session?.name, repo, ...result, title: args.title, ...(args.proposal ? { proposal: true } : {}) });
 					return text(result.duplicateOf ? `Commented on existing friction ${repo}#${result.duplicateOf}.` : `Filed ${result.url}`);
 				} catch (error) {
 					return fail(`Could not file friction: ${String((error as { stderr?: string }).stderr || error).slice(0, 400)}`);
@@ -1706,6 +1708,16 @@ export const Loops_ = defineExtension({
 				note: Type.String(),
 				directionVersion: Type.Optional(Type.Number({ description: "The version of the current direction you worked under (shown in the prompt); confirms you saw it." })),
 				nextTask: Type.Optional(Type.String({ maxLength: 1200, description: "One bounded next slice: relevant files, acceptance criteria, next action. Empty or omitted clears the previous item." })),
+				needsOwner: Type.Optional(
+					Type.Object(
+						{
+							ask: Type.String({ description: "The single concrete ask for Tony or a general." }),
+							options: Type.Optional(Type.Array(Type.String())),
+							recommendation: Type.Optional(Type.String()),
+						},
+						{ description: "Set when this loop needs the owner, whatever the status; `pd brief` lists it. Omit to clear." },
+					),
+				),
 			}),
 			execute: async (args, api, context) => {
 				const { name: caller } = await sessionCwd(api, api.conversationId, context);
@@ -1718,6 +1730,8 @@ export const Loops_ = defineExtension({
 					recordAck((await tx.doc(Directions)).byKey[directionKey(caller, githubRepoOf(remote))], loop.id, args.directionVersion, Date.now());
 					loop.note = args.note;
 					loop.nextTask = args.nextTask?.trim() || undefined;
+					if (args.needsOwner !== undefined && args.needsOwner.ask.trim() !== "") loop.needsOwner = args.needsOwner;
+					else delete loop.needsOwner;
 					if (args.status === "idle") loop.idleReported = true;
 					else if (loop.status === "active" && args.status !== "continue") loop.status = args.status === "done" ? "done" : "paused";
 					// "continue" from a dormant loop (work done outside a tick, e.g. on a message) means there is work again.
@@ -1738,7 +1752,7 @@ export const Loops_ = defineExtension({
 				if (replacedTask !== undefined) {
 					await harness().abortTask(replacedTask as never, context).catch((error: unknown) => audit("loop_task_end_failed", { loop: args.loopId, task: replacedTask, error: String(error) }));
 				}
-				audit("loop_report", { loop: args.loopId, status: args.status, note: args.note, nextTask: updated.nextTask });
+				audit("loop_report", { loop: args.loopId, status: args.status, note: args.note, nextTask: updated.nextTask, ...(updated.needsOwner ? { needsOwner: updated.needsOwner } : {}) });
 				return { ...text(`Loop ${args.loopId}: ${updated.status} — ${args.note}`), control: { terminate: true } };
 			},
 		}),
