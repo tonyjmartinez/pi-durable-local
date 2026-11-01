@@ -8,9 +8,8 @@ import { describe, it } from "node:test";
 const LINE_CALLS = /\b(endLiveTask|getTask|abortTask|waitForTask|retryTask)\s*\(|\.inspect\s*\(/;
 
 /** The body of every `.commit(async (tx) => { … })` callback in a source file, found by brace matching. */
-function commitBodies(source: string): { line: number; body: string }[] {
+function commitBodies(source: string, start = /\.commit\(\s*async\s*\(\s*tx\s*\)\s*=>\s*\{/g): { line: number; body: string }[] {
 	const out: { line: number; body: string }[] = [];
-	const start = /\.commit\(\s*async\s*\(\s*tx\s*\)\s*=>\s*\{/g;
 	for (let match = start.exec(source); match !== null; match = start.exec(source)) {
 		let depth = 1;
 		let i = match.index + match[0].length;
@@ -30,6 +29,21 @@ describe("commit callbacks", () => {
 			for (const { line, body } of commitBodies(readFileSync(`src/${file}`, "utf8"))) {
 				const hit = LINE_CALLS.exec(body);
 				if (hit) offenders.push(`src/${file}:${line} calls ${hit[0]} inside a commit`);
+			}
+		}
+		assert.deepEqual(offenders, []);
+	});
+
+	it("name a conversation for every task they create on the harness (it has none of its own)", () => {
+		// `conversation.commit` supplies its conversation; `harness.commit` does not, and createTask then throws
+		// "Tx.createTask() requires options.conversationId" (pd direct failed this way after the deadlock fix).
+		const offenders: string[] = [];
+		for (const file of readdirSync("src").filter((name) => name.endsWith(".ts"))) {
+			const source = readFileSync(`src/${file}`, "utf8");
+			for (const { line, body } of commitBodies(source, /harness\.commit\(\s*async\s*\(\s*tx\s*\)\s*=>\s*\{/g)) {
+				for (const call of body.match(/tx\.createTask\([^;]*;/g) ?? []) {
+					if (!/conversationId/.test(call)) offenders.push(`src/${file}:${line} creates a task without a conversationId`);
+				}
 			}
 		}
 		assert.deepEqual(offenders, []);
