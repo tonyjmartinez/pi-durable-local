@@ -73,10 +73,10 @@ export function buildBrief(input: BriefInput): string {
 	const proposals = input.proposals ?? [];
 	const proposalKeys = new Set(proposals.map((p) => `${p.repo}#${p.number}`));
 	const decisions = input.decisions.filter((issue) => !proposalKeys.has(`${issue.repo}#${issue.number}`));
-	const stale = (input.directions ?? []).filter((d) => input.now - d.at <= 48 * 3_600_000).flatMap((d) => pivotStale(d, input.loops, input.now));
+	const stale = (input.directions ?? []).flatMap((d) => pivotStale(d, input.loops, input.now));
 	const needs = parks.length + stuck.length + asks.length + decisions.length + stale.length;
 
-	lines.push(needs === 0 ? "NEEDS A GENERAL: nothing. The workforce is unblocked." : `NEEDS A GENERAL (${needs})`);
+	lines.push(needs === 0 ? "NEEDS A GENERAL: no pending decisions." : `NEEDS A GENERAL (${needs})`);
 	for (const park of parks) {
 		lines.push(`- PR ${park.key} parked: ${park.reason}`);
 		if (park.review) lines.push(`    review: ${clip(park.review, 300)}`);
@@ -108,7 +108,7 @@ export function buildBrief(input: BriefInput): string {
 	if (input.budget !== undefined) lines.push("", budgetLine(input.budget));
 
 	const active = input.loops.filter((loop) => loop.status === "active");
-	lines.push("", `WORKFORCE: ${input.sessions.filter((s) => s.busy).length}/${input.sessions.length} sessions busy, ${active.filter((l) => !l.dormant).length} loops working, ${active.filter((l) => l.dormant).length} dormant`);
+	lines.push("", `WORKFORCE: ${input.sessions.filter((s) => s.busy).length}/${input.sessions.length} sessions busy, ${active.filter((l) => !l.dormant).length} loops scheduled, ${active.filter((l) => l.dormant).length} dormant`);
 	for (const loop of active) {
 		lines.push(`- ${loop.id} ${loop.session}${loop.dormant ? " (dormant)" : ""} $${(loop.spent ?? 0).toFixed(2)}/$${loop.budgetUsd}: ${clip(loop.note ?? loop.goal, 160)}`);
 	}

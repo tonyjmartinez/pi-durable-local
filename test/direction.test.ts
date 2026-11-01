@@ -49,9 +49,23 @@ test("stale loops and brief", () => {
 	const ls = [{ id: "L1", session: "a", status: "active", lastRunAt: 2000 }, { id: "L2", session: "b", status: "active", lastRunAt: 500 }];
 	assert.equal(pivotStale(pd, ls, 3000).length, 1);
 	assert.equal(pivotStale(pd, ls, 1000 + 3 * 3_600_000).length, 2);
-	assert.equal(pivotLines([pd], ls, 1000 + 49 * 3_600_000).length, 0);
+	assert.match(pivotLines([pd], ls, 1000 + 49 * 3_600_000).join("\n"), /L2 b: pending/);
 	assert.match(pivotLines([pd], ls, 3000).join("\n"), /L2 b: pending/);
 	const brief = buildBrief({ now: 3000, sessions: [], loops: ls.map((l) => ({ ...l, goal: "g", budgetUsd: 1, iteration: 1 })), audit: [], openPrs: new Set(), decisions: [], directions: [pd] });
 	assert.match(brief, /NEEDS A GENERAL \(1\)/);
 	assert.match(brief, /PIVOTS/);
+});
+
+
+test("unacknowledged directions remain actionable after 48h until resolved", () => {
+	const { direction } = applyDirection({ byKey: {} }, "o/r", { text: "new goal", by: "tony", now: 1000 }, loops());
+	const pd = { key: "o/r", ...direction };
+	const now = 1000 + 72 * 3_600_000;
+	const ls = [{ id: "L1", session: "a", status: "active", goal: "g", budgetUsd: 1, iteration: 0 }];
+	const input = { now, sessions: [], loops: ls, audit: [], openPrs: new Set<string>(), decisions: [], directions: [pd] };
+	assert.match(buildBrief(input), /NEEDS A GENERAL \(1\)/);
+	assert.match(buildBrief(input), /still pending on o\/r direction v1 after 72h/);
+	recordAck(direction, "L1", direction.version, now);
+	assert.equal(pivotLines([pd], ls, now).length, 0, "acks for inactive or absent loops do not keep old directions visible");
+	assert.match(buildBrief(input), /^NEEDS A GENERAL: no pending decisions/);
 });
