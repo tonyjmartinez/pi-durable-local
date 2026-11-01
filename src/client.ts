@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 import { buildBrief, openParks } from "./brief.ts";
 import { analyzeTranscript, formatCostReport } from "./costreport.ts";
 import { DB_PATH, ENV_FILE, loadSecrets, POLICY_FILE, SOCKET_PATH } from "./config.ts";
+import { describeBoost } from "./boost.ts";
 
 type Json = any;
 
@@ -340,6 +341,9 @@ const HELP = `pd — pi-durable sessions that keep running
                                             clone, create a session, and (with a goal or preset) start a loop
   pd status                                 sessions, loops, spend
   pd direct <session|owner/repo> ["text"] [--by name]   show or set the repo's direction; every loop must acknowledge it
+  pd budget                                 pi's Claude API spend in 24h against the daily cap, and active boosts
+  pd budget boost <usd> --by <general> --reason "…" [--hours 24]
+                                            generals: raise the cap for a few hours (max $50, 48h; audited)
   pd direct <session|owner/repo> ["text"] [--by n]  show or set a repo direction every loop must ack
   pd brief                                  for generals: what needs a decision, then the workforce
   pd new <name> --cwd <dir> [--purpose "…"] [--model provider/id]
@@ -456,6 +460,23 @@ async function main(argv: string[]): Promise<void> {
 				const { direction: d, loops } = await call("POST", path, { text: words.join(" "), by: typeof opts.by === "string" ? opts.by : undefined });
 				console.log(`direction v${d.version} set; loops pending: ${loops.join(", ") || "none"}`);
 			}
+			return;
+		}
+		case "budget": {
+			// The cap limits pi's Claude API spend only. A general can lend headroom for a few hours; it is audited.
+			const [sub = "show", amount] = positional;
+			if (sub === "boost") {
+				const by = typeof opts.by === "string" ? opts.by : undefined;
+				const reason = typeof opts.reason === "string" ? opts.reason : undefined;
+				const result = await call("POST", "/budget/boost", { usd: amount, ...(opts.hours ? { hours: Number(opts.hours) } : {}), by, reason });
+				console.log(`boosted: cap is now $${result.capUsd} (base $${result.baseCapUsd}) until the boost expires`);
+				for (const boost of result.boosts as Json[]) console.log(`  ${describeBoost(boost as never)}`);
+				return;
+			}
+			if (sub !== "show") throw new Error('usage: pd budget | pd budget boost <usd> --by <general> --reason "..." [--hours 24]');
+			const b = await call("GET", "/budget");
+			console.log(`$${Number(b.daySpend).toFixed(2)} of $${b.capUsd} in 24h${b.exceeded ? " (cap reached: loops wait, sends are refused)" : ""}; base cap $${b.baseCapUsd}`);
+			for (const boost of b.boosts as Json[]) console.log(`  boost ${describeBoost(boost as never)}`);
 			return;
 		}
 		case "ask": {
