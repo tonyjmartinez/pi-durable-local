@@ -230,3 +230,13 @@ describe("proposal notification", () => {
 		assert.equal(notificationFor("friction", { title: "x", url: "u" }), undefined);
 	});
 });
+
+describe("needsOwner notification", () => {
+	it("notifies with the ask on any status, not only blocked", () => {
+		const n = notificationFor("loop_report", { loop: "L9", status: "idle", note: "n", needsOwner: { ask: "Need the API key" } });
+		assert.equal(n?.type, "loop_blocked");
+		assert.equal(n?.title, "Loop L9 needs you");
+		assert.equal(n?.text, "Need the API key");
+		assert.equal(notificationFor("loop_report", { loop: "L9", status: "continue", note: "n" }), undefined);
+	});
+});

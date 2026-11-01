@@ -149,6 +149,7 @@ export function notificationFor(event: string, data: Record<string, unknown>): N
 				? { type: "proposal", title: `Proposal: ${String(data.title ?? "")}`.slice(0, 120), text: `${String(data.repo ?? "")} needs your call (pd brief)`, url: data.url }
 				: undefined;
 		case "loop_report":
+			if (typeof (data.needsOwner as { ask?: unknown } | undefined)?.ask === "string") return { type: "loop_blocked", title: `Loop ${String(data.loop)} needs you`, text: (data.needsOwner as { ask: string }).ask };
 			return data.status === "blocked" ? { type: "loop_blocked", title: `Loop ${String(data.loop)} blocked`, text: String(data.note ?? "") } : undefined;
 		case "loop_budget":
 			return { type: "budget_hit", title: `Loop ${String(data.loop)} hit its budget`, text: String(data.note ?? "") };
