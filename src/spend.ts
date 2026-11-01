@@ -64,3 +64,34 @@ export function nextRoomAt(loops: readonly SpendingLoop[], now: number, budgetUs
 	}
 	return undefined;
 }
+
+/** One sample of every session's lifetime cost added up. */
+export type TotalSample = { at: number; total: number };
+
+/**
+ * The samples with one more, unless the last one is under `minGapMs` old. Drops samples older than `keepMs` but keeps
+ * the newest of those, so a full window always has a baseline. Returns a new array.
+ */
+export function recordTotal(samples: readonly TotalSample[] | undefined, total: number, now: number, minGapMs = 5 * 60_000, keepMs = 2 * DAY_MS): TotalSample[] {
+	const valid = (samples ?? []).filter((s) => Number.isFinite(s.at) && Number.isFinite(s.total));
+	const last = valid[valid.length - 1];
+	const next = !Number.isFinite(total) || (last !== undefined && now - last.at < minGapMs) ? valid : [...valid, { at: now, total }];
+	const old = next.filter((s) => s.at <= now - keepMs);
+	return [...old.slice(-1), ...next.filter((s) => s.at > now - keepMs)];
+}
+
+/**
+ * Everything all sessions spent in the window, loops or not: the total now minus the total at the window's start
+ * (the newest sample at or before it). Without a sample that old, the oldest one at or after `since` is the baseline,
+ * which undercounts until a day of samples exists. Never negative (a deleted session lowers the total).
+ */
+export function totalSpendInWindow(samples: readonly TotalSample[] | undefined, total: number, now: number, since = 0, windowMs = DAY_MS): number {
+	const start = Math.max(now - windowMs, since);
+	const valid = (samples ?? []).filter((s) => Number.isFinite(s.at) && Number.isFinite(s.total)).sort((a, b) => a.at - b.at);
+	const before = valid.filter((s) => s.at <= start);
+	const baseline = start === since && since > now - windowMs
+		? valid.find((s) => s.at >= since)
+		: before[before.length - 1] ?? valid.find((s) => s.at >= since);
+	if (baseline === undefined || !Number.isFinite(total)) return 0;
+	return Math.max(0, total - baseline.total);
+}

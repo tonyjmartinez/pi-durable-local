@@ -88,7 +88,12 @@ export type Loop = {
 	idleReported?: boolean;
 };
 
-export const Loops = defineDoc<{ byId: Record<string, Loop>; nextId: number }>({
+export const Loops = defineDoc<{
+	byId: Record<string, Loop>;
+	nextId: number;
+	/** Samples of every session's total cost (last two days), so the daily cap counts spend outside loops too. */
+	factorySpend?: { at: number; total: number }[];
+}>({
 	kind: "pdl.loops",
 	version: 1,
 	scope: "session",

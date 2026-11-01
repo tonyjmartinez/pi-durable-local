@@ -23,7 +23,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
-import { dryRunGates, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
+import { dryRunGates, sampleFactorySpend, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_ } from "./extensions.ts";
 import {
 	applyLoopSettings,
 	applyResume,
@@ -453,6 +453,12 @@ const frictionTimer = setInterval(() => {
 	void sweepAuditFriction(context).then((filed) => filed > 0 && log(`friction sweep filed ${filed} issue(s)`)).catch((error) => log("friction sweep failed", String(error)));
 }, 6 * 60 * 60 * 1000);
 frictionTimer.unref();
+
+// Every 5 minutes, sample all sessions' spend so the daily cap counts pi agents' work outside loops too.
+const sampleSpend = () => void sampleFactorySpend(harness, context).catch((error) => log("spend sample failed", String(error)));
+sampleSpend();
+const spendTimer = setInterval(sampleSpend, 5 * 60 * 1000);
+spendTimer.unref();
 
 let closing = false;
 async function shutdown(signal: string) {

@@ -29,7 +29,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
 import { AUTO_DORMANT_AFTER, afterIteration, CI_RUNS_WINDOW, MAINTENANCE_BRANCH_SLUGS, ciKey, DORMANT_RECHECK_MINUTES, type GatePr, type GateRepo, shouldWake, summarizeRuns, workFingerprint } from "./loopgate.ts";
-import { dailyBudget, nextRoomAt, recordSpend } from "./spend.ts";
+import { dailyBudget, nextRoomAt, recordSpend, recordTotal, totalSpendInWindow } from "./spend.ts";
 import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, type FrictionInput, frictionFromAudit } from "./friction.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
 import { testWeakening } from "./testguard.ts";
@@ -1399,6 +1399,23 @@ export async function sessionCost(reader: { snapshot: Harness["snapshot"] }, ses
 	return total;
 }
 
+/** Record every session's total cost on the Loops doc, for the factory-wide daily cap. The daemon calls it on a timer. */
+export async function sampleFactorySpend(api: { snapshot: Harness["snapshot"]; commit: Harness["commit"] }, context: Context): Promise<void> {
+	const sessions = await api.snapshot(Sessions, context);
+	const total = await allSessionsCost(api, sessions?.byName ?? {}, context);
+	await api.commit(async (tx) => {
+		const doc = await tx.doc(Loops);
+		doc.factorySpend = recordTotal(doc.factorySpend, total, Date.now());
+	}, context);
+}
+
+/** Every session's lifetime cost, subagents included. */
+export async function allSessionsCost(reader: { snapshot: Harness["snapshot"] }, byName: Record<string, SessionInfo>, context: Context): Promise<number> {
+	let total = 0;
+	for (const [name, info] of Object.entries(byName)) total += await sessionCost(reader, name, info.conversationId as number, context);
+	return total;
+}
+
 export function loopPrompt(loop: Loop, policy: Policy, wakeReason?: string, direction?: Direction, oldPrs: readonly { number: number }[] = []): string {
 	return `[loop ${loop.id}, iteration ${loop.iteration + 1}/${loop.maxIterations}]
 ${wakeReason ? `Woken because: ${wakeReason}
@@ -1562,9 +1579,17 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 			const allLoops = Object.values((await runtime.snapshot(Loops, context))?.byId ?? {});
 			const budgetSince = Number.isFinite(policy.loops.dailyBudgetSince) ? policy.loops.dailyBudgetSince! : 0;
 			const budgetLoops = allLoops.map((item) => ({ ...item, spendLog: item.spendLog?.filter((entry) => entry.at >= budgetSince) }));
-			const daily = dailyBudget(budgetLoops, Date.now(), policy.loops.dailyBudgetUsd);
+			const loopDaily = dailyBudget(budgetLoops, Date.now(), policy.loops.dailyBudgetUsd);
+			// Loops are not the only spenders: direct sends, chat messages and reviews cost too. The daemon samples every
+			// session's total (sampleFactorySpend); charge the day's change, so the cap holds for all pi agents.
+			const samples = (await runtime.snapshot(Loops, context))?.factorySpend;
+			const latest = samples?.[samples.length - 1];
+			const allSpent = Math.max(loopDaily.spent, latest === undefined ? 0 : totalSpendInWindow(samples, latest.total, Date.now(), budgetSince));
+			const capped = policy.loops.dailyBudgetUsd > 0 && Number.isFinite(policy.loops.dailyBudgetUsd);
+			const daily = { spent: allSpent, exceeded: capped && allSpent >= policy.loops.dailyBudgetUsd };
 			if (daily.exceeded) {
-				const at = nextRoomAt(budgetLoops, Date.now(), policy.loops.dailyBudgetUsd) ?? Date.now() + 60 * 60_000;
+				// Loop charges age out on a known schedule; other spend is only sampled, so look again in half an hour.
+				const at = loopDaily.exceeded ? nextRoomAt(budgetLoops, Date.now(), policy.loops.dailyBudgetUsd) ?? Date.now() + 60 * 60_000 : Date.now() + 30 * 60_000;
 				audit("loop_skip", { loop: loop.id, reason: `daily budget $${policy.loops.dailyBudgetUsd} reached ($${daily.spent.toFixed(2)})`, nextCheckMinutes: Math.ceil((at - Date.now()) / 60_000) });
 				await runtime.commit(async (tx) => {
 					const current = (await tx.doc(Loops)).byId[task.input.loopId]!;

@@ -1135,3 +1135,24 @@ describe("loop_report", () => {
 		assert.deepEqual(created, []);
 	});
 });
+
+describe("the daily cap counts spend outside loops", () => {
+	it("waits when sessions spent the day's budget through direct sends, with no loop charges at all", async () => {
+		setPolicy({ dailyBudgetUsd: 10 });
+		const now = Date.now();
+		store.seed(Loops, { byId: { L1: baseLoop() }, nextId: 2, factorySpend: [{ at: now - 23 * 60 * 60_000, total: 5 }, { at: now - 60_000, total: 16 }] });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.equal(submits.length, 0, "no model call over the cap");
+		assert.equal(loopDoc()!.note, "waiting: factory daily budget reached");
+	});
+
+	it("runs when the day's change in session totals is under the cap", async () => {
+		setPolicy({ dailyBudgetUsd: 10 });
+		const now = Date.now();
+		store.seed(Loops, { byId: { L1: baseLoop() }, nextId: 2, factorySpend: [{ at: now - 25 * 60 * 60_000, total: 5 }, { at: now - 60_000, total: 14 }] });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:0"]);
+	});
+});
