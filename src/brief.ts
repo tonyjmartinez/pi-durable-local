@@ -21,6 +21,8 @@ export type BriefInput = {
 	directions?: PivotDirection[];
 	/** Open issues labelled `proposal`. */
 	proposals?: BriefProposal[];
+	/** The personal assistant's latest agenda for Tony (memory topic owner-agenda). */
+	agenda?: { text: string; by: string; updatedAt: number };
 	/** The factory budget (see budgetStatus) plus the loop queue's counts. */
 	budget?: { capUsd: number; daySpend: number; exceeded: boolean; pace?: { windowHours: number; spent: number; allowance: number }; running: number; waiting: number };
 };
@@ -66,6 +68,11 @@ export function budgetLine(b: NonNullable<BriefInput["budget"]>): string {
 
 export function buildBrief(input: BriefInput): string {
 	const lines: string[] = [];
+	if (input.agenda !== undefined) {
+		const minutes = Math.max(0, Math.round((input.now - input.agenda.updatedAt) / 60_000));
+		const age = minutes < 90 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
+		lines.push(`YOUR AGENDA (from ${input.agenda.by}, ${age} ago)`, ...input.agenda.text.trim().split("\n").map((line) => `  ${line}`), "");
+	}
 	const parks = openParks(input.audit, input.openPrs);
 	// A loop Tony paused himself is not a decision; only system pauses and failures stay.
 	const stuck = input.loops.filter((loop) => (loop.status === "paused" || loop.status === "failed") && !isUserPaused(loop));

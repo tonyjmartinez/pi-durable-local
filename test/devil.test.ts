@@ -96,6 +96,40 @@ describe("business-review preset", () => {
 	});
 	it("gates factory_evidence to business-review sessions", () => {
 		const src = readFileSync(new URL("../src/extensions.ts", import.meta.url), "utf8");
-		assert.match(src, /loop\.kind === "business-review"\) && loop\.status === "active"/);
+		assert.match(src, /loop\.kind === "business-review" \|\| loop\.kind === "assistant"\) && loop\.status === "active"/);
+	});
+});
+
+describe("personal-assistant preset", () => {
+	it("is its own kind, looks every 30 minutes on a small budget, and always wakes on schedule", () => {
+		assert.equal(LOOP_SCHEDULE["personal-assistant"].kind, "assistant");
+		assert.equal(LOOP_SCHEDULE["personal-assistant"].intervalMinutes, 30);
+		assert.equal(LOOP_SCHEDULE["personal-assistant"].budgetUsd, 3);
+		assert.match(LOOP_PROMPTS["personal-assistant"], /owner-agenda/);
+		assert.match(LOOP_PROMPTS["personal-assistant"], /at most TWO per run/);
+		const repo = { openAgentPrs: [], openFrictionIssues: 0, baseHeadSha: "abc", baseHeadCommittedAt: NOW } as never;
+		assert.equal(shouldWake({ loop: { kind: "assistant", iteration: 3, lastRunAt: NOW - 1000, dormant: { fingerprint: "x", since: 0 } }, repo, now: NOW }).wake, true);
+	});
+
+	it("attentionKey changes only when something that could need Tony changes", async () => {
+		const { attentionKey } = await import("../src/devil.ts");
+		const base = { audit: [{ at: at(5), event: "parked", repo: "o/r", pr: 3 }, { at: at(1), event: "loop_skip", loop: "L1" }], loops: [loop] };
+		const key = attentionKey(base);
+		assert.equal(attentionKey({ ...base, audit: [...base.audit, { at: at(0.5), event: "loop_skip", loop: "L2" }, { at: at(0.4), event: "pushed" }] }), key, "routine events don't count");
+		assert.notEqual(attentionKey({ ...base, audit: [...base.audit, { at: at(0.5), event: "merged", repo: "o/r", pr: 4 }] }), key, "a merge does");
+		assert.notEqual(attentionKey({ ...base, audit: [...base.audit, { at: at(0.5), event: "loop_report", loop: "L1", status: "blocked" }] }), key, "a blocked report does");
+		assert.notEqual(attentionKey({ ...base, loops: [{ ...loop, needsOwner: { ask: "which font?" } }] }), key, "a new ask does");
+	});
+
+	it("puts what is waiting on Tony first in the evidence", async () => {
+		const text = buildEvidence({
+			now: NOW,
+			loops: [loop],
+			audit: [],
+			chat: [],
+			owner: { parked: [{ repo: "o/r", pr: 7, sha: "abcdef123", reason: "touches config" }], decisions: [{ repo: "o/r", number: 9, title: "Pick a domain" }], asks: [{ loop: "L3", session: "s", ask: "Which photo source?" }] },
+		});
+		assert.match(text, /^OWNER ITEMS \(3\)\n- parked PR o\/r#7: touches config \| pd approve o\/r 7 abcdef1\n- needs-decision o\/r#9: Pick a domain\n- loop L3 \(s\) asks: Which photo source\?/);
+		assert.match(buildEvidence({ now: NOW, loops: [], audit: [], chat: [], owner: { parked: [], decisions: [], asks: [] } }), /OWNER ITEMS \(0\)\n- nothing is waiting on Tony/);
 	});
 });

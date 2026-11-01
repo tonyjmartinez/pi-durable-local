@@ -1282,3 +1282,25 @@ describe("waiting on the daily cap", () => {
 		assert.ok(wait <= 60 * 60_000 + 1000 && wait > 50 * 60_000, `rechecks in about an hour, not 23h (got ${Math.round(wait / 60_000)}m)`);
 	});
 });
+
+describe("the personal assistant", () => {
+	it("skips without a model call when nothing that could need Tony changed", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 0 } }));
+		store.seed(Loops, { byId: { L1: baseLoop({ kind: "assistant", lastAttentionKey: "|0|", lastRunAt: Date.now() - 30 * 60_000 }) }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 1 }), runtime(), context);
+		assert.equal(submits.length, 0);
+		assert.equal(loopDoc()!.note, "skipped: nothing new for Tony");
+	});
+
+	it("runs when something changed, and remembers what it saw", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 0 } }));
+		writeFileSync(AUDIT, `${JSON.stringify({ at: new Date().toISOString(), event: "parked", repo: "o/r", pr: 2 })}\n`);
+		store.seed(Loops, { byId: { L1: baseLoop({ kind: "assistant", lastAttentionKey: "|0|", lastRunAt: Date.now() - 30 * 60_000 }) }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		writeFileSync(AUDIT, `${JSON.stringify({ at: new Date().toISOString(), event: "parked", repo: "o/r", pr: 2 })}\n`);
+		await phases.run(task({ phase: "run", iteration: 1 }), runtime(), context);
+		assert.equal(submits.length, 1);
+		assert.notEqual(loopDoc()!.lastAttentionKey, "|0|");
+	});
+});
