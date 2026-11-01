@@ -6,7 +6,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { ChatError, appendChat, formatMessage, makeMessage, postChat, readChat } from "../src/chat.ts";
+import { ChatError, askChat, getCursor, inbox, waitInbox, whoChat, appendChat, formatMessage, makeMessage, postChat, readChat } from "../src/chat.ts";
 
 let dir: string;
 let daemon: Server;
@@ -76,5 +76,54 @@ describe("postChat and readChat", () => {
 		assert.deepEqual(readChat(file, { limit: 2 }).map((m) => m.text), ["2", "3"]);
 		assert.deepEqual(readChat(file, { after: ids[0] }).map((m) => m.text), ["2", "3"]);
 		assert.deepEqual(readChat(join(dir, "missing.jsonl")), []);
+	});
+});
+
+describe("bridge", () => {
+	const mk = (from: string, to: string, text: string) => {
+		const m = makeMessage({ from, to, text });
+		return m;
+	};
+	it("inbox filters, advances the cursor, and peek does not", () => {
+		const f = join(dir, "i.jsonl");
+		const c = join(dir, "i-cur.json");
+		appendChat(mk("a", "b", "one"), f);
+		appendChat(mk("b", "all", "own"), f);
+		appendChat(mk("a", "all", "two"), f);
+		appendChat(mk("a", "c", "other"), f);
+		assert.deepEqual(inbox("b", { file: f, cursorFile: c, peek: true }).map((m) => m.text), ["one", "two"]);
+		assert.equal(getCursor("b", c), undefined);
+		assert.deepEqual(inbox("b", { file: f, cursorFile: c }).map((m) => m.text), ["one", "two"]);
+		assert.equal(statSync(c).mode & 0o777, 0o600);
+		assert.deepEqual(inbox("b", { file: f, cursorFile: c }), []);
+		appendChat(mk("a", "b", "three"), f);
+		assert.deepEqual(inbox("b", { file: f, cursorFile: c }).map((m) => m.text), ["three"]);
+	});
+	it("wait resolves on append and times out", async () => {
+		const f = join(dir, "w.jsonl");
+		const c = join(dir, "w-cur.json");
+		appendChat(mk("a", "all", "seed"), f);
+		inbox("b", { file: f, cursorFile: c });
+		assert.equal(await waitInbox("b", { file: f, cursorFile: c, timeoutSec: 0.2, pollMs: 50 }), null);
+		setTimeout(() => { appendChat(mk("a", "b", "hi"), f) }, 100);
+		const got = await waitInbox("b", { file: f, cursorFile: c, timeoutSec: 5, pollMs: 50 });
+		assert.equal(got?.[0]?.text, "hi");
+	});
+	it("ask matches only the reply from <to> to <from>", async () => {
+		const f = join(dir, "a.jsonl");
+		setTimeout(() => {
+			appendChat(mk("z", "a", "noise"), f);
+			appendChat(mk("b", "z", "wrong recipient"), f);
+			appendChat(mk("b", "a", "answer"), f);
+		}, 100);
+		const reply = await askChat({ from: "a", to: "b", text: "q" }, { file: f, deliver: false, timeoutSec: 5, pollMs: 50 });
+		assert.equal(reply?.text, "answer");
+		assert.equal(await askChat({ from: "a", to: "q", text: "q" }, { file: f, deliver: false, timeoutSec: 0.2, pollMs: 50 }), null);
+	});
+	it("who lists recent posters", () => {
+		const f = join(dir, "who.jsonl");
+		appendChat(mk("a", "all", "x"), f);
+		assert.deepEqual(whoChat({ file: f, cursorFile: join(dir, "none.json") }).map((w) => w.name), ["a"]);
+		assert.deepEqual(whoChat({ file: f, cursorFile: join(dir, "none.json"), now: Date.now() + 48 * 3600_000 }), []);
 	});
 });

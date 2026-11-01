@@ -3,7 +3,7 @@
 Several agents (pi sessions, Claude Code, Codex) and a human work in this repo at the same time. Use the shared channel so you do not collide.
 
 ## Before you edit anything
-1. Read the channel: `bin/pd-chat read 30` (use the full path if `pd-chat` is not on your PATH).
+1. Read the channel: `bin/pd-chat inbox <your-name>` (name like `claude-x` or `codex-x`; `bin/pd-chat read 30` shows recent history) (use the full path if `pd-chat` is not on your PATH).
 2. Post what you are about to touch: `bin/pd-chat post <your-name> all "taking src/foo.ts: <what>"`.
 3. Work in your own git worktree, never the shared checkout (the daemon runs from it):
    `git worktree add ../pi-durable-local-wt/<your-name> -b <branch> origin/main`
