@@ -177,13 +177,20 @@ describe("resolveLoopSpec", () => {
 		assert.match(spec.goal, /designer/);
 	});
 
+	it("devils-advocate is its own kind, every 6h, with a small budget", () => {
+		const spec = resolveLoopSpec({ preset: "devils-advocate" });
+		assert.equal(spec.intervalMinutes, 360);
+		assert.match(spec.goal, /devil's advocate/);
+		assert.match(spec.goal, /never insult a person/);
+	});
+
 	it("an interval given with a preset is kept", () => {
 		assert.equal(resolveLoopSpec({ preset: "docs-freshness", intervalMinutes: 90 }).intervalMinutes, 90);
 	});
 
 	it("refuses an unknown preset and lists the real ones", () => {
 		for (const preset of ["nope", "", "KEEP-TESTS-TIGHT"]) assert.equal(status(() => resolveLoopSpec({ preset })), 400, preset);
-		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, code-quality, ci-health, product-gardener, design-polish/);
+		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, code-quality, ci-health, product-gardener, design-polish, devils-advocate/);
 	});
 
 	it("refuses names that only exist on every object", () => {

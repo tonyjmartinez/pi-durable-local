@@ -2,12 +2,14 @@
 // The cleanup schedule and the "skip if no commits in 24h" rule follow Kent C. Dodds's autopilot cleanup automations
 // (https://github.com/kentcdodds/kcd-skills, MIT). All times are epoch milliseconds.
 
+import { DEVILS_ADVOCATE_PROMPT } from "./devil.ts";
+
 /**
  * goal: always wakes. cleanup: skips when the base branch is idle. friction-sweep: skips with no open friction.
  * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
  * flaky base branch. design: wakes like goal, but is its own kind so a repo can run one product and one design loop.
  */
-export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health";
+export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate";
 
 export type GateLoop = {
 	/** Default "goal". */
@@ -142,7 +144,7 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 
 	// Maintenance waits while product loops need the day's budget. A red base branch is the exception: it blocks
 	// every product PR anyway.
-	const maintenance = kind === "code-quality" || kind === "ci-health";
+	const maintenance = kind === "code-quality" || kind === "ci-health" || kind === "devils-advocate";
 	const baseRed = kind === "ci-health" && repo.ci !== undefined && repo.ci.failing.length > 0;
 	if (maintenance && !baseRed && repo.dailySpendShare !== undefined && repo.dailySpendShare >= MAINTENANCE_SHARE_OF_DAILY) {
 		return { wake: false, reason: `today's spend is ${Math.round(repo.dailySpendShare * 100)}% of the daily cap; product loops go first`, nextCheckMinutes: IDLE_RECHECK_MINUTES };
@@ -284,7 +286,7 @@ export const DESIGN_POLISH_PROMPT = [
 	"Leave product copy, features and information architecture to the product loop. Do not add fonts, image assets from outside the repo, or dependencies. Name the branch pd/design-<slug> and declare Touches: <area> so it composes with the product loop's PRs; if a product PR is open on the same files, pick another area.",
 ].join("\n");
 
-export type LoopPreset = CleanupName | "product-gardener" | "design-polish";
+export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate";
 
 export const PRODUCT_GARDENER_PROMPT = [
 	"Incrementally improve this repository for its users. Act as the product-minded maintainer, not just a ticket taker.",
@@ -299,10 +301,12 @@ export const LOOP_PROMPTS: Record<LoopPreset, string> = {
 	...CLEANUP_PROMPTS,
 	"product-gardener": PRODUCT_GARDENER_PROMPT,
 	"design-polish": DESIGN_POLISH_PROMPT,
+	"devils-advocate": DEVILS_ADVOCATE_PROMPT,
 };
 
 export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
 	...CLEANUP_SCHEDULE,
 	"product-gardener": { kind: "goal", intervalMinutes: 30 },
 	"design-polish": { kind: "design", intervalMinutes: 60 },
+	"devils-advocate": { kind: "devils-advocate", intervalMinutes: 6 * 60, budgetUsd: 3 },
 };
