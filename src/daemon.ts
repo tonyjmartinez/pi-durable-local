@@ -47,6 +47,7 @@ import {
 	stopPatch,
 	updateProjectPolicy,
 	validateSessionName,
+	worktreeCwdProblem,
 } from "./ops.ts";
 import { Approvals, audit, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
@@ -150,6 +151,8 @@ async function createSession(body: { name?: string; cwd?: string; purpose?: stri
 	const name = validateSessionName(body.name);
 	const cwd = resolve(body.cwd ?? process.env.HOME!);
 	if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new HttpError(400, `${cwd} is not a directory`);
+	const worktreeProblem = worktreeCwdProblem(cwd);
+	if (worktreeProblem !== undefined) throw new HttpError(400, worktreeProblem);
 	const existing = await harness.snapshot(Sessions, context);
 	if (existing?.byName[name] !== undefined) throw new HttpError(409, `session ${name} exists`);
 	const policy = loadPolicy();
