@@ -1,5 +1,6 @@
 // pd: terminal client for the pdd daemon.
 import { execFileSync, spawnSync } from "node:child_process";
+import { priorityOf, queueOrder } from "./queue.ts";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { request } from "node:http";
 import { resolve } from "node:path";
@@ -290,6 +291,7 @@ function printLoop(loop: Json): void {
 	console.log(
 		`  ${c.bold(loop.id.padEnd(4))} ${color(status.padEnd(7))} ${loop.session.padEnd(14)} ${loop.iteration}/${loop.maxIterations}  every ${loop.intervalMinutes}m  ${money(loop.spent ?? 0)}/${money(loop.budgetUsd)}  next ${loop.status === "active" ? ago(loop.nextRunAt) : "-"}`,
 	);
+	if (loop.priority !== undefined || loop.kind === "request") console.log(c.dim(`       priority ${loop.priority ?? "-"}${loop.kind === "request" ? " · request" : ""}`));
 	console.log(`       ${loop.goal.slice(0, 110)}`);
 	if (loop.note) console.log(c.dim(`       ${loop.note.slice(0, 160)}`));
 }
@@ -353,7 +355,10 @@ const HELP = `pd — pi-durable sessions that keep running
                                             devils-advocate audits the factory's process and files findings;
                                             budget-review checks pi spend vs output every 4h and files savings)
   pd loop ls | pause <id> | resume <id> | stop <id>
-  pd loop set <id> [--every 30] [--max 17520] [--budget 100]
+  pd loop set <id> [--every 30] [--max 17520] [--budget 100] [--priority 1-5|urgent|high|normal|low|idle]
+  pd ask <session> "what you want" [--priority high] [--max 5]
+                                            a one-off request that takes its turn in the loop queue
+  pd queue                                  loops in turn order: running, waiting (by priority), scheduled
 
   pd mem [search words]                     shared memory
   pd mem add "topic" "fact" [--project <dir>]
@@ -448,6 +453,30 @@ async function main(argv: string[]): Promise<void> {
 			}
 			return;
 		}
+		case "ask": {
+			// An owner request: a one-off task that takes its turn in the loop queue.
+			const [session = "", ...words] = positional;
+			if (!session || words.length === 0) throw new Error('usage: pd ask <session> "what you want" [--priority urgent|high|normal|low|idle] [--max 5]');
+			const loop = await call("POST", "/loops", {
+				session,
+				request: words.join(" "),
+				priority: typeof opts.priority === "string" ? opts.priority : undefined,
+				maxIterations: opts.max ? Number(opts.max) : undefined,
+				budgetUsd: opts.budget ? Number(opts.budget) : undefined,
+			});
+			printLoop(loop);
+			return;
+		}
+		case "queue": {
+			const loops = (await call("GET", "/loops")) as Json[];
+			const now = Date.now();
+			for (const { loop, state } of queueOrder(loops as never, now) as { loop: Json; state: string }[]) {
+				if (loop.dormant) continue;
+				const when = state === "running" ? `running ${ago(loop.inFlightSince)}` : state === "waiting" ? `waiting since ${ago(loop.waitingSince)}` : `next ${ago(loop.nextRunAt)}`;
+				console.log(`  p${priorityOf(loop as never)} ${c.bold(String(loop.id).padEnd(4))} ${String(loop.session).padEnd(18)} ${(loop.kind ?? "goal").padEnd(14)} ${when}${loop.kind === "request" ? c.dim(`  ${String(loop.goal).split("\n")[0]!.replace(/^Owner request[^:]*: /, "").slice(0, 70)}`) : ""}`);
+			}
+			return;
+		}
 		case "loop": {
 			const [sub = "ls", ...loopArgs] = positional;
 			if (sub === "start") {
@@ -458,6 +487,7 @@ async function main(argv: string[]): Promise<void> {
 					intervalMinutes: opts.every ? Number(opts.every) : undefined,
 					maxIterations: opts.max ? Number(opts.max) : undefined,
 					budgetUsd: opts.budget ? Number(opts.budget) : undefined,
+					priority: typeof opts.priority === "string" ? opts.priority : undefined,
 				});
 				printLoop(loop);
 			} else if (sub === "ls") for (const loop of await call("GET", "/loops")) printLoop(loop);
@@ -467,6 +497,7 @@ async function main(argv: string[]): Promise<void> {
 						intervalMinutes: opts.every ? Number(opts.every) : undefined,
 						maxIterations: opts.max ? Number(opts.max) : undefined,
 						budgetUsd: opts.budget ? Number(opts.budget) : undefined,
+						priority: typeof opts.priority === "string" ? opts.priority : undefined,
 					}),
 				);
 			}

@@ -1186,3 +1186,36 @@ describe("maintenance loops on the cheaper model", () => {
 		assert.equal((directives.at(-1)!.checkpoint as { restoreModel?: string }).restoreModel, undefined);
 	});
 });
+
+describe("loops take turns", () => {
+	it("waits for a slot without a model call, and marks itself waiting", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 0, maxConcurrent: 1 } }));
+		store.seed(Loops, { byId: { L1: baseLoop(), L2: baseLoop({ id: "L2", session: "other", inFlightSince: Date.now() - 60_000 }) }, nextId: 3 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.equal(submits.length, 0);
+		assert.match(loopDoc()!.note, /queued: 1 of 1 slots busy \(L2\)/);
+		assert.ok(loopDoc()!.waitingSince !== undefined);
+	});
+
+	it("holds a slot from submit until the iteration settles", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 0, maxConcurrent: 1 } }));
+		store.seed(Loops, { byId: { L1: baseLoop({ waitingSince: Date.now() - 60_000 }) }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.deepEqual(submits.map((submit) => submit.requestId), ["loop:L1:0"]);
+		assert.ok(loopDoc()!.inFlightSince !== undefined, "running");
+		assert.equal(loopDoc()!.waitingSince, undefined, "no longer waiting");
+		await phases.await(task({ phase: "await", iteration: 0, costBefore: 0 }), runtime(), context);
+		assert.equal(loopDoc()!.inFlightSince, undefined, "slot freed");
+	});
+
+	it("waits while pacing says the hour's allowance is used", async () => {
+		writeFileSync(join(process.env.PD_CONFIG_DIR!, "policy.json"), JSON.stringify({ loops: { dailyBudgetUsd: 24, pace: true, paceBurst: 1 } }));
+		store.seed(Loops, { byId: { L1: baseLoop({ spendLog: [{ at: Date.now() - 10 * 60_000, usd: 1.5 }] }) }, nextId: 2 });
+		setup({ loop: null, remote: null });
+		await phases.run(task({ phase: "run", iteration: 0 }), runtime(), context);
+		assert.equal(submits.length, 0);
+		assert.match(loopDoc()!.note, /pacing, \$1\.50 spent in the last hour \(allowance \$1\.00\)/);
+	});
+});

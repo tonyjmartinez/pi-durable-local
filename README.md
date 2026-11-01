@@ -177,6 +177,24 @@ Lifecycle: `active` while scheduled; `paused` when you pause it, when the budget
 
 Each iteration orients to memory, Git status, open PRs, CI and prior notes, then chooses one small product improvement. Agents make routine, reversible product decisions themselves and record their reasoning; they ask Tony only for material risks or facts only he can provide. They finish any open PR first with pr_tick; otherwise they implement on a fresh branch, verify the change, open at most one PR, save handoff context, and finish with loop_report (continue, idle, done, or blocked).
 
+### Taking turns: the queue and owner requests
+
+Loops share a few slots. When a loop's gate says wake, it still waits for its turn:
+
+- At most `loops.maxConcurrent` iterations run at once.
+- With `loops.pace`, a loop waits while the last hour's pi spend is over `dailyBudgetUsd / 24 x paceBurst`, so the day's budget is spread across the day instead of being used up in a burst.
+- Among waiting loops, the highest priority goes first (1 urgent .. 5 idle), then whoever has waited longest. A loop without its own priority gets one by kind: requests and budget-review 2, product and design 3, maintenance 4.
+
+Waiting costs no model call; the loop looks again every 10 minutes.
+
+```
+pd ask <session> "add a dark mode toggle" [--priority urgent|high|normal|low|idle] [--max 5]
+pd queue                                   # running, then waiting in turn order, then scheduled
+pd loop set <id> --priority 1
+```
+
+`pd ask` makes a request loop: a bounded one-off task (5 iterations and $5 by default, priority high) that reports `done` when it is finished.
+
 ### Dormant loops
 
 A loop that has run out of work goes to sleep instead of paying for empty iterations. It happens two ways. The agent reports `idle` (nothing worthwhile left right now), or the daemon sees 3 completed iterations in a row that changed nothing on GitHub. "Nothing" means the same base-branch head, the same open agent PR heads, and the same open issues before and after the iteration. A dormant loop stays `active` (shown as `dormant` in `pd status`), and every 6 hours the gate looks at GitHub without any model call. It wakes when the work fingerprint changes: a new commit on the base branch, a new or updated agent PR, or a new or edited issue. `pd loop resume <id>` wakes it by hand. The audit log records `loop_dormant` and `loop_wake`.
@@ -281,6 +299,9 @@ The allowlist is empty by default, which means nothing auto-merges anywhere: PRs
 | `automerge.mergeMethod` | `squash` | `squash`, `merge`, or `rebase` |
 | `loops.defaultBudgetUsd` | `100` | Per-loop spend cap |
 | `loops.dailyBudgetUsd` | `1` | Shared cap on all pi sessions' spend in any 24 hours, inside loops or not (the daemon samples session totals every 5 min); loops wait when it is reached |
+| `loops.maxConcurrent` | unset (no limit) | At most this many loop iterations run at once; the rest queue by priority |
+| `loops.pace` | `false` | Spread the daily cap over the day: wait while the last hour spent more than `dailyBudgetUsd / 24 x paceBurst` |
+| `loops.paceBurst` | `2` | How far over the even hourly rate one hour may go |
 | `loops.maintenanceModel` | unset | Model for friction-sweep, ci-health, code-quality and cleanup iterations (e.g. Haiku); the session's model is restored after |
 | `loops.defaultIntervalMinutes` | `30` | Time between iterations (half an hour) |
 | `loops.defaultMaxIterations` | `17520` | Iteration cap (one year at the default cadence) |
