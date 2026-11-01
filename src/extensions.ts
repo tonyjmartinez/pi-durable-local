@@ -289,6 +289,12 @@ export const Sessions_ = defineExtension({
 				if (target === undefined) return fail(`No session named ${args.to}`);
 				if (target.conversationId === api.conversationId) return fail("That is you.");
 				const from = sessionNameOf(sessions!.byName, api.conversationId) ?? "another session";
+				// A message makes the other session spend; over the cap it waits like everything else.
+				const refusal = capRefusal(await currentBudget(api, context));
+				if (refusal !== undefined) {
+					audit("send_refused", { from, to: args.to, reason: "daily cap" });
+					return fail(`Not sent: ${refusal.replace(/ Queue it.*$/, " Put it in your loop_report nextTask instead.")}`);
+				}
 				const conversation = await api.conversation(target.conversationId as never, context);
 				if (conversation === undefined) return fail(`Session ${args.to} has no conversation`);
 				await conversation.submit(
@@ -1440,6 +1446,26 @@ export async function sampleFactorySpend(api: { snapshot: Harness["snapshot"]; c
 		const doc = await tx.doc(Loops);
 		doc.factorySpend = recordTotal(doc.factorySpend, total, Date.now());
 	}, context);
+}
+
+/** The factory budget right now, as the loops count it (see budgetStatus). */
+export async function currentBudget(reader: { snapshot: Harness["snapshot"] }, context: Context, now = Date.now()): Promise<ReturnType<typeof budgetStatus>> {
+	const policy = loadPolicy();
+	const doc = await reader.snapshot(Loops, context);
+	return budgetStatus({
+		loops: Object.values(doc?.byId ?? {}),
+		...(doc?.factorySpend ? { samples: doc.factorySpend } : {}),
+		now,
+		capUsd: policy.loops.dailyBudgetUsd,
+		...(policy.loops.dailyBudgetSince !== undefined ? { since: policy.loops.dailyBudgetSince } : {}),
+	});
+}
+
+/** Why a message that would make a pi session spend is refused right now, or undefined when there is room. */
+export function capRefusal(budget: { capUsd: number; daySpend: number; exceeded: boolean }): string | undefined {
+	return budget.exceeded
+		? `the factory's daily cap is reached ($${budget.daySpend.toFixed(2)} of $${budget.capUsd} in 24h), so pi sessions take no new messages until there is room. Queue it with pd ask (it runs when there is room), or resend with --force if it cannot wait.`
+		: undefined;
 }
 
 /** Every session's lifetime cost, subagents included. */
