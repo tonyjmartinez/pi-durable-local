@@ -321,6 +321,7 @@ describe("run phase: submitting an iteration", () => {
 		assert.equal(submits[0]!.requestId, "loop:L1:0");
 		assert.deepEqual(submits[0]!.entry, { kind: "pdl.loop-tick", data: { loopId: "L1", iteration: 0 } });
 		assert.match(submits[0]!.content, /^\[loop L1, iteration 1\/5\]\nOngoing goal: Improve the thing/);
+		assert.match(submits[0]!.content, /already covered by an open PR .* skip it and take the next unclaimed item/, "a taken item is skipped, not a reason to idle");
 		assert.deepEqual(directives, [{ status: "running", checkpoint: { phase: "await", iteration: 0, costBefore: 0 } }]);
 	});
 
