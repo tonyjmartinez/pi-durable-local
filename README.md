@@ -49,6 +49,7 @@ Why not systemd: on WSL, WSLg mounts its own tmpfs over `/run/user/$UID`, which 
 pd factory <owner/repo> ["goal"] [--preset product-gardener] [--base main] [--merge] [--name n]
                                           clone, create a session, and (with a goal or preset) start a loop
 pd status                                 sessions, loops, spend, parked tasks
+pd direct <session|owner/repo> ["text"] [--by name]   show or set the repo direction (pivot)
 pd brief                                  for generals: what needs a decision, then the workforce
 pd new <name> --cwd <dir> [--purpose "..."] [--model provider/id]
 pd attach <name>                          live view and chat
@@ -155,6 +156,8 @@ The reasons that always park a PR for a human are: it comes from a fork; its aut
 The state machine's `decide()` design, and the idea of one deterministic next action per tick, come from Kent C. Dodds's autopilot system.
 
 ## Loops
+
+**Direction (pivots).** `pd direct <session|owner/repo> "text"` sets a versioned, per-repo direction. Setting it bumps the version (history is kept), clears every loop's `nextTask` on that repo, wakes dormant loops, marks each loop's acknowledgement `pending`, audits `direction_set` and posts to the chat channel. Every loop prompt of any kind starts with "Current direction vN ... overrides the goal and any handoff"; on the first iteration after a bump the agent also gets its open PRs created before it and must keep, rework or close each and fix memory/roadmap. Agents confirm by passing `directionVersion` to `loop_report`. `pd brief` shows a PIVOTS section (acked/pending per loop, last 48h) and flags under NEEDS A GENERAL any loop that finished an iteration without acking or is still pending after 2h. Loops that are mid-sleep see it on their next scheduled run (at most one interval).
 
 ```sh
 pd loop start myproj "Get the test suite green and the docs current" --every 30 --max 10 --budget 3

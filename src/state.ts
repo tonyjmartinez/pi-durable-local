@@ -1,6 +1,7 @@
 // Session-scoped durable documents: every conversation in the daemon reads and writes the same copies.
 import { appendFileSync } from "node:fs";
 import { defineDoc } from "@earendil-works/pi-durable";
+import type { DirectionState } from "./direction.ts";
 import { AUDIT_LOG, loadSecrets } from "./config.ts";
 import { type NotifyEvent, notify } from "./notify.ts";
 
@@ -92,6 +93,14 @@ export const Loops = defineDoc<{ byId: Record<string, Loop>; nextId: number }>({
 	version: 1,
 	scope: "session",
 	initial: () => ({ byId: {}, nextId: 1 }),
+	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
+});
+
+export const Directions = defineDoc<DirectionState>({
+	kind: "pdl.directions",
+	version: 1,
+	scope: "session",
+	initial: () => ({ byKey: {} }),
 	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
 });
 
