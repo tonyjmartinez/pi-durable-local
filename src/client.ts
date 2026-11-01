@@ -275,7 +275,13 @@ async function brief(): Promise<void> {
 	});
 	const dirs = (await call("GET", "/directions")) as Record<string, Json>;
 	const directions = Object.entries(dirs).map(([key, d]) => ({ key, ...d }));
-	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, directions: directions as never }));
+	const proposals = owners.flatMap((owner) => {
+		const out = gh(["search", "issues", "--owner", owner, "--label", "proposal", "--state", "open", "--json", "repository,number,title,createdAt,body"]);
+		return out.status === 0
+			? (JSON.parse(out.stdout || "[]") as Json[]).map((i) => ({ repo: i.repository.nameWithOwner, number: i.number, title: i.title, createdAt: i.createdAt, defaultBy: /^Default by:\s*(\S+)/m.exec(i.body ?? "")?.[1] }))
+			: [];
+	});
+	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, proposals, directions: directions as never }));
 }
 
 function printLoop(loop: Json): void {

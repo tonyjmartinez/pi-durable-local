@@ -60,3 +60,33 @@ describe("buildBrief", () => {
 		assert.match(out, /Models in use: anthropic\/claude-sonnet-5-5/);
 	});
 });
+
+describe("escalations", () => {
+	const loop = (over: Record<string, unknown>) => ({ id: "L1", session: "s", status: "active", goal: "g", budgetUsd: 1, iteration: 1, ...over }) as Parameters<typeof buildBrief>[0]["loops"][number];
+	const ask = { ask: "Need BALLDONTLIE_API_KEY", options: ["add key", "drop feature"], recommendation: "add key" };
+
+	it("lists needsOwner of an active, dormant or paused loop", () => {
+		const out = buildBrief({ ...base, loops: [loop({ id: "L1", needsOwner: ask }), loop({ id: "L2", dormant: true, needsOwner: ask }), loop({ id: "L3", status: "paused", note: "blocked", needsOwner: ask })] });
+		assert.match(out, /NEEDS A GENERAL \(3\)/);
+		assert.match(out, /loop L2 \(s, dormant, active\) asks: Need BALLDONTLIE_API_KEY/);
+		assert.match(out, /options: add key \| drop feature/);
+		assert.match(out, /recommendation: add key/);
+	});
+
+	it("drops loops the user paused, keeps system pauses and failures", () => {
+		const out = buildBrief({ ...base, loops: [loop({ id: "L1", status: "paused", note: "paused by user" }), loop({ id: "L2", status: "paused", note: "budget hit" }), loop({ id: "L3", status: "failed", note: "boom" })] });
+		assert.match(out, /NEEDS A GENERAL \(2\)/);
+		assert.ok(!out.includes("L1"));
+	});
+
+	it("shows proposals with age and default-by, and not twice as decisions", () => {
+		const out = buildBrief({
+			...base,
+			decisions: [{ repo: "o/r", number: 9, title: "Proposal: bold" }, { repo: "o/r", number: 4, title: "other" }],
+			proposals: [{ repo: "o/r", number: 9, title: "Proposal: bold", createdAt: "2026-10-30T00:00:00Z", defaultBy: "2026-11-02T00:00:00Z" }],
+		});
+		assert.match(out, /PROPOSALS \(1\)\n- o\/r#9: Proposal: bold \(open 24h; adopts the recommendation by default at 2026-11-02/);
+		assert.match(out, /NEEDS A GENERAL \(1\)/);
+		assert.ok(!out.includes("decision o/r#9"));
+	});
+});

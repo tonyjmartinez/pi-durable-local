@@ -221,3 +221,22 @@ describe("rate limiting", () => {
 		assert.equal((await notify(event, options)).skipped, undefined);
 	});
 });
+
+import { notificationFor } from "../src/state.ts";
+describe("proposal notification", () => {
+	it("notifies once for a newly filed proposal, not for duplicates or plain friction", () => {
+		assert.equal(notificationFor("friction", { proposal: true, title: "x", repo: "o/r", url: "https://github.com/o/r/issues/1" })?.type, "proposal");
+		assert.equal(notificationFor("friction", { proposal: true, title: "x", repo: "o/r", duplicateOf: 1 }), undefined);
+		assert.equal(notificationFor("friction", { title: "x", url: "u" }), undefined);
+	});
+});
+
+describe("needsOwner notification", () => {
+	it("notifies with the ask on any status, not only blocked", () => {
+		const n = notificationFor("loop_report", { loop: "L9", status: "idle", note: "n", needsOwner: { ask: "Need the API key" } });
+		assert.equal(n?.type, "loop_blocked");
+		assert.equal(n?.title, "Loop L9 needs you");
+		assert.equal(n?.text, "Need the API key");
+		assert.equal(notificationFor("loop_report", { loop: "L9", status: "continue", note: "n" }), undefined);
+	});
+});

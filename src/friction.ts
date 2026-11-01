@@ -17,11 +17,16 @@ export type FrictionInput = {
 	priority: Priority;
 	/** A human call is needed (a policy change, a product decision): agents wait for it. */
 	needsDecision?: boolean;
+	/** A strategist proposal for the owner: labelled `proposal` and `needs-decision`, never by title alone. */
+	proposal?: boolean;
+	/** ISO time a two-way proposal is adopted by default if nobody answers. */
+	defaultBy?: string;
 	/** Stable identity for deduplication, e.g. `guard:<rule>`. Written into the body as a hidden marker. */
 	key?: string;
 };
 
 export const FRICTION_LABEL = "friction";
+export const PROPOSAL_LABEL = "proposal";
 
 export const FRICTION_TEMPLATE = `## What happened
 
@@ -69,11 +74,13 @@ export function buildFrictionIssue(input: FrictionInput): { title: string; body:
 		`## Cost\n\n${block(input.cost, "(not given)")}`,
 		`## What you already looked at\n\n${block(input.alreadyLooked, "(nothing recorded)")}`,
 		`## Relevant files\n\n${files.length === 0 ? "(none)" : files.map((file) => `- \`${file}\``).join("\n")}`,
-		`Priority: ${input.priority}\nNeeds decision: ${input.needsDecision === true ? "yes" : "no"}`,
+		`Priority: ${input.priority}\nNeeds decision: ${input.needsDecision === true || input.proposal === true ? "yes" : "no"}`,
 	];
+	if (input.proposal === true && input.defaultBy !== undefined) sections.push(`Default by: ${oneLine(input.defaultBy)}`);
 	if (input.key !== undefined) sections.push(`<!-- friction-key: ${oneLine(input.key)} -->`);
 	const labels = [FRICTION_LABEL, input.priority];
-	if (input.needsDecision === true) labels.push("needs-decision");
+	if (input.needsDecision === true || input.proposal === true) labels.push("needs-decision");
+	if (input.proposal === true) labels.push(PROPOSAL_LABEL);
 	return { title, body: `${sections.join("\n\n")}\n`, labels };
 }
 

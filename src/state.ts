@@ -43,6 +43,8 @@ export const Memories = defineDoc<{ items: Record<string, Memory>; nextId: numbe
 	checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
 });
 
+export type NeedsOwner = { ask: string; options?: string[]; recommendation?: string };
+
 export type LoopStatus = "active" | "paused" | "done" | "failed";
 
 export type Loop = {
@@ -84,6 +86,8 @@ export type Loop = {
 	dormant?: { fingerprint: string; since: number };
 	/** Consecutive completed iterations that changed nothing on GitHub. */
 	noopStreak?: number;
+	/** Set by loop_report when the loop needs the owner; `pd brief` lists it whatever the loop's status. */
+	needsOwner?: NeedsOwner;
 	/** The agent's last loop_report said "idle"; the iteration's end puts the loop to sleep. */
 	idleReported?: boolean;
 };
@@ -140,7 +144,12 @@ export function notificationFor(event: string, data: Record<string, unknown>): N
 			return { type: "merged", title: `Merged ${pr}`, text: `tier ${String(data.tier ?? "?")} by ${String(data.session ?? "a session")}`, ...(url ? { url } : {}) };
 		case "parked":
 			return { type: "parked", title: `Needs you: ${pr}${data.sha ? ` @${String(data.sha)}` : ""}`, text: [String(data.reason ?? ""), ...((data.details as string[] | undefined) ?? [])].join("\n"), ...(url ? { url } : {}) };
+		case "friction":
+			return data.proposal === true && typeof data.url === "string"
+				? { type: "proposal", title: `Proposal: ${String(data.title ?? "")}`.slice(0, 120), text: `${String(data.repo ?? "")} needs your call (pd brief)`, url: data.url }
+				: undefined;
 		case "loop_report":
+			if (typeof (data.needsOwner as { ask?: unknown } | undefined)?.ask === "string") return { type: "loop_blocked", title: `Loop ${String(data.loop)} needs you`, text: (data.needsOwner as { ask: string }).ask };
 			return data.status === "blocked" ? { type: "loop_blocked", title: `Loop ${String(data.loop)} blocked`, text: String(data.note ?? "") } : undefined;
 		case "loop_budget":
 			return { type: "budget_hit", title: `Loop ${String(data.loop)} hit its budget`, text: String(data.note ?? "") };
