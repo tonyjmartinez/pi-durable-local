@@ -226,7 +226,7 @@ async function startProject(body: { repo?: string; name?: string; purpose?: stri
 	return { session, loop };
 }
 
-async function startLoop(body: { session?: string; goal?: string; preset?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number }) {
+async function startLoop(body: { session?: string; goal?: string; preset?: string; request?: string; priority?: unknown; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number }) {
 	const policy = loadPolicy();
 	const { conversation } = await sessionByName(String(body.session ?? ""));
 	// A preset supplies its own brief and cadence; the preset kind controls its idle gate.

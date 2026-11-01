@@ -31,6 +31,7 @@ import {
 import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
 import { AUTO_DORMANT_AFTER, afterIteration, CI_RUNS_WINDOW, MAINTENANCE_BRANCH_SLUGS, ciKey, DORMANT_RECHECK_MINUTES, type GatePr, type GateRepo, shouldWake, summarizeRuns, workFingerprint } from "./loopgate.ts";
 import { dailyBudget, dailySpend, nextRoomAt, recordSpend, recordTotal, spendByLoop, totalSpendInWindow } from "./spend.ts";
+import { QUEUE_RECHECK_MINUTES, takeTurn } from "./queue.ts";
 import { type AuditEntry, buildFrictionIssue, findDuplicate, FRICTION_LABEL, type FrictionInput, frictionFromAudit } from "./friction.ts";
 import { checkToolCall, protectedMatches } from "./guard.ts";
 import { testWeakening } from "./testguard.ts";
@@ -1636,8 +1637,8 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 			// Loops are not the only spenders: direct sends, chat messages and reviews cost too. The daemon samples every
 			// session's total (sampleFactorySpend); charge the day's change, so the cap holds for all pi agents.
 			const samples = (await runtime.snapshot(Loops, context))?.factorySpend;
-			const latest = samples?.[samples.length - 1];
-			const allSpent = Math.max(loopDaily.spent, latest === undefined ? 0 : totalSpendInWindow(samples, latest.total, Date.now(), budgetSince));
+			const latestTotal = samples?.[samples.length - 1];
+			const allSpent = Math.max(loopDaily.spent, latestTotal === undefined ? 0 : totalSpendInWindow(samples, latestTotal.total, Date.now(), budgetSince));
 			const capped = policy.loops.dailyBudgetUsd > 0 && Number.isFinite(policy.loops.dailyBudgetUsd);
 			const daily = { spent: allSpent, exceeded: capped && allSpent >= policy.loops.dailyBudgetUsd };
 			if (daily.exceeded) {
@@ -1683,6 +1684,31 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				}
 			}
 
+			// Take a turn: a free slot, room in the hour's paced spend, and no higher-priority loop waiting first.
+			const queued = Object.values((await runtime.snapshot(Loops, context))?.byId ?? {});
+			const hour = 60 * 60_000;
+			const hourSpend = Math.max(dailySpend(budgetLoops, Date.now(), hour), latestTotal === undefined ? 0 : totalSpendInWindow(samples, latestTotal.total, Date.now(), budgetSince, hour));
+			const burst = Number.isFinite(policy.loops.paceBurst) && policy.loops.paceBurst! > 0 ? policy.loops.paceBurst! : 2;
+			const turn = takeTurn({
+				loop,
+				loops: queued,
+				now: Date.now(),
+				maxConcurrent: Number.isFinite(policy.loops.maxConcurrent) ? policy.loops.maxConcurrent! : 0,
+				hourSpend,
+				...(policy.loops.pace && capped ? { hourAllowance: (policy.loops.dailyBudgetUsd / 24) * burst } : {}),
+			});
+			if (!turn.start) {
+				audit("loop_skip", { loop: loop.id, reason: turn.reason, nextCheckMinutes: QUEUE_RECHECK_MINUTES });
+				await runtime.commit(async (tx) => {
+					const current = (await tx.doc(Loops)).byId[task.input.loopId]!;
+					current.waitingSince ??= Date.now();
+					current.nextRunAt = Date.now() + QUEUE_RECHECK_MINUTES * 60_000;
+					current.note = turn.reason;
+					return { status: "running", checkpoint: { phase: "wait" } };
+				}, context);
+				return;
+			}
+
 			const conversation = await harness().conversation(session.conversationId as never, context);
 			if (conversation === undefined) return stop("failed", "conversation missing");
 			// Start from a short handoff rather than re-reading (and re-paying for) every earlier iteration. Only when the
@@ -1710,7 +1736,15 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				},
 				context,
 			);
-			await runtime.commit(() => ({ status: "running", checkpoint: { phase: "await", iteration, costBefore, ...(restoreModel ? { restoreModel } : {}), ...(facts ? { baseSha: facts.baseHeadSha, fingerprint: workFingerprint(facts) } : {}), ...(facts?.ci ? { ciKey: ciKey(facts.ci) } : {}) } }), context);
+			await runtime.commit(async (tx) => {
+				// The iteration holds a slot until it settles.
+				const current = (await tx.doc(Loops)).byId[task.input.loopId];
+				if (current !== undefined) {
+					current.inFlightSince = Date.now();
+					delete current.waitingSince;
+				}
+				return { status: "running", checkpoint: { phase: "await", iteration, costBefore, ...(restoreModel ? { restoreModel } : {}), ...(facts ? { baseSha: facts.baseHeadSha, fingerprint: workFingerprint(facts) } : {}), ...(facts?.ci ? { ciKey: ciKey(facts.ci) } : {}) } };
+			}, context);
 		},
 		await: async (task, runtime, context) => {
 			const { iteration, baseSha, costBefore, fingerprint, ciKey: wokenCiKey, restoreModel } = task.state.checkpoint;
@@ -1735,6 +1769,7 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				if (current === undefined) return { status: "terminal", outcome: { status: "completed", result: { iterations: iteration } } };
 				current.iteration = iteration + 1;
 				current.lastRunAt = Date.now();
+				delete current.inFlightSince;
 				if (costBefore !== undefined) {
 					const delta = Math.max(0, costAfter - costBefore);
 					current.spent = (current.spent ?? 0) + delta;

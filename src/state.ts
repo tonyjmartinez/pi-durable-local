@@ -71,10 +71,16 @@ export type Loop = {
 	 * loops on one session don't charge each other.
 	 */
 	spent?: number;
+	/** Turn order when loops wait for a slot: 1 most urgent .. 5 least. Unset: by kind (see queue.ts priorityOf). */
+	priority?: number;
+	/** When this loop started waiting for its turn (its gate said wake but no slot was free). */
+	waitingSince?: number;
+	/** When the current iteration was submitted; cleared when it settles. Counts against loops.maxConcurrent. */
+	inFlightSince?: number;
 	/** Time-stamped charges (last two days), for the factory-wide daily budget. */
 	spendLog?: { at: number; usd: number }[];
 	/** How the loop gate decides to wake it; see LoopKind in loopgate.ts. Default goal. */
-	kind?: "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "strategy";
+	kind?: "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "strategy" | "request";
 	/** strategy: indices of the lenses the last runs used (newest last), so the rotation is deterministic. */
 	lensHistory?: number[];
 	/** ci-health: the CI finding the last completed iteration was woken for. */

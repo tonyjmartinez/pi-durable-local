@@ -48,6 +48,12 @@ export type Policy = {
 		freshContext: boolean;
 		/** Cap on all loops' spend together in any 24 hours, in USD; loops wait for room when it is reached. 0 = no cap. */
 		dailyBudgetUsd: number;
+		/** At most this many loop iterations run at once; the rest queue by priority. Unset or 0: no limit. */
+		maxConcurrent?: number;
+		/** Pace spend across the day: a loop waits while the last hour's spend is over dailyBudgetUsd / 24 x paceBurst. */
+		pace?: boolean;
+		/** How far over the even hourly rate one hour may go when pacing. Default 2. */
+		paceBurst?: number;
 		/** Model for routine maintenance loops (friction-sweep, ci-health, code-quality, cleanup). Unset = session model. */
 		maintenanceModel?: string;
 		/** Optional one-time budget start in epoch milliseconds; historical spend remains recorded. */

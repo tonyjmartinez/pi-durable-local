@@ -10,7 +10,7 @@ import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } fro
  * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
  * flaky base branch. design: wakes like goal, but is its own kind so a repo can run one product and one design loop.
  */
-export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "strategy";
+export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "strategy" | "request";
 
 export type GateLoop = {
 	/** Default "goal". */

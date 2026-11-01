@@ -4,6 +4,7 @@
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { LOOP_PROMPTS, LOOP_SCHEDULE, type LoopPreset } from "./loopgate.ts";
+import { parsePriority, type Priority, requestGoal } from "./queue.ts";
 import type { Loop, Memory } from "./state.ts";
 
 export class HttpError extends Error {
@@ -87,8 +88,8 @@ export function assertApprovedHead(head: string, expected: string): void {
 // ---------------------------------------------------------------------------------------------------------------
 // Loops
 
-export type LoopRequest = { session?: string; goal?: string; preset?: string; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number };
-export type LoopSpec = { goal: string; preset?: LoopPreset; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number };
+export type LoopRequest = { session?: string; goal?: string; preset?: string; request?: string; priority?: unknown; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number };
+export type LoopSpec = { goal: string; preset?: LoopPreset; kind?: "request"; priority?: Priority; intervalMinutes?: number; maxIterations?: number; budgetUsd?: number };
 export type LoopDefaults = { defaultBudgetUsd: number; defaultIntervalMinutes: number; defaultMaxIterations: number };
 
 /** What a request may ask for. The settings route enforces the same floor for the interval. */
@@ -105,6 +106,21 @@ export function resolveLoopSpec(body: LoopRequest): LoopSpec {
 	let goal = body.goal;
 	let intervalMinutes = body.intervalMinutes;
 	let preset: LoopPreset | undefined;
+	const maxIterations = body.maxIterations;
+	const priority = body.priority === undefined ? undefined : parsePriority(body.priority);
+	if (body.priority !== undefined && priority === undefined) throw new HttpError(400, "priority is 1-5 or urgent, high, normal, low, idle");
+	// An owner request: a bounded one-off task that takes its turn in the queue (high priority unless told otherwise).
+	if (typeof body.request === "string" && body.request.trim()) {
+		if (body.preset !== undefined || body.goal !== undefined) throw new HttpError(400, "a request has no goal or preset");
+		return {
+			goal: requestGoal(body.request),
+			kind: "request",
+			priority: priority ?? 2,
+			intervalMinutes: clamp(body.intervalMinutes ?? 30, LOOP_LIMITS.intervalMinutes),
+			maxIterations: clamp(maxIterations ?? 5, LOOP_LIMITS.maxIterations),
+			budgetUsd: clamp(body.budgetUsd ?? 5, LOOP_LIMITS.budgetUsd),
+		};
+	}
 	if (body.preset !== undefined) {
 		if (typeof body.preset !== "string" || !Object.hasOwn(LOOP_PROMPTS, body.preset)) {
 			throw new HttpError(400, `unknown preset; one of ${Object.keys(LOOP_PROMPTS).join(", ")}`);
@@ -117,8 +133,9 @@ export function resolveLoopSpec(body: LoopRequest): LoopSpec {
 	return {
 		goal,
 		...(preset === undefined ? {} : { preset }),
+		...(priority === undefined ? {} : { priority }),
 		intervalMinutes: clamp(intervalMinutes, LOOP_LIMITS.intervalMinutes),
-		maxIterations: clamp(body.maxIterations, LOOP_LIMITS.maxIterations),
+		maxIterations: clamp(maxIterations, LOOP_LIMITS.maxIterations),
 		budgetUsd: clamp(body.budgetUsd, LOOP_LIMITS.budgetUsd),
 	};
 }
@@ -157,6 +174,8 @@ export function newLoop(input: { id: string; session: string; spec: LoopSpec; de
 		nextRunAt: input.now,
 		costAtStart: input.costAtStart,
 		...(schedule === undefined ? {} : { kind: schedule.kind, ...(schedule.skipIfIdleHours ? { skipIfIdleHours: schedule.skipIfIdleHours } : {}) }),
+		...(spec.kind === undefined ? {} : { kind: spec.kind }),
+		...(spec.priority === undefined ? {} : { priority: spec.priority }),
 	};
 }
 
@@ -165,6 +184,11 @@ export function applyLoopSettings(loop: Loop, body: Record<string, unknown>): vo
 	if (typeof body.intervalMinutes === "number" && body.intervalMinutes >= LOOP_LIMITS.intervalMinutes[0]) loop.intervalMinutes = body.intervalMinutes;
 	if (typeof body.maxIterations === "number" && body.maxIterations >= 1) loop.maxIterations = body.maxIterations;
 	if (typeof body.budgetUsd === "number" && body.budgetUsd > 0) loop.budgetUsd = body.budgetUsd;
+	if (body.priority !== undefined) {
+		const priority = parsePriority(body.priority);
+		if (priority === undefined) throw new HttpError(400, "priority is 1-5 or urgent, high, normal, low, idle");
+		loop.priority = priority;
+	}
 }
 
 /** What pause and stop record on the loop. */
@@ -183,6 +207,8 @@ export function applyResume(loop: Loop, cost: number, now: number): void {
 	// Resuming is also how a person wakes a dormant loop.
 	delete loop.dormant;
 	delete loop.idleReported;
+	delete loop.waitingSince;
+	delete loop.inFlightSince;
 	loop.noopStreak = 0;
 	loop.costAtStart = cost;
 	// A resumed loop gets a fresh budget window.
