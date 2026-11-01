@@ -1470,9 +1470,33 @@ Advance this goal by one meaningful, reviewable step, then stop. Each iteration:
  * conversation that must not be wiped.
  */
 export const RESET_WINDOW = 50;
+/** How far back the reset check pages for the newest input. A long iteration is easily more than one window. */
+export const RESET_SCAN_LIMIT = 2000;
+
+const isInput = (entry: { kind: string }) => entry.kind === "pi.user" || entry.kind === "pdl.peer" || entry.kind === "pdl.loop-tick";
+
+/**
+ * Page back through a conversation (newest first) until the newest input, the start of the history, or `limit`
+ * entries. Returns the entries read and whether they settle who spoke last (an input was found or nothing is older).
+ */
+export async function scanForLastInput<C>(
+	page: (limit: number, cursor: C | undefined) => Promise<{ readonly items: readonly { kind: string }[]; readonly next?: C }>,
+	pageSize = RESET_WINDOW,
+	limit = RESET_SCAN_LIMIT,
+): Promise<{ items: { kind: string }[]; settled: boolean }> {
+	const items: { kind: string }[] = [];
+	let cursor: C | undefined;
+	while (items.length < limit) {
+		const result = await page(pageSize, cursor);
+		items.push(...result.items);
+		if (result.items.some(isInput) || result.next === undefined || result.items.length === 0) return { items, settled: true };
+		cursor = result.next;
+	}
+	return { items, settled: false };
+}
 
 export function mayResetForLoop(newestFirst: readonly { kind: string }[], windowSize = RESET_WINDOW): boolean {
-	const lastInput = newestFirst.find((entry) => entry.kind === "pi.user" || entry.kind === "pdl.peer" || entry.kind === "pdl.loop-tick");
+	const lastInput = newestFirst.find(isInput);
 	// A full window with no input in it means whoever spoke last is further back: unknown, so don't wipe.
 	if (lastInput === undefined) return newestFirst.length < windowSize;
 	return lastInput.kind === "pdl.loop-tick";
@@ -1723,8 +1747,10 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 			// session is idle and nothing but the loop has spoken to it since its last tick.
 			if (policy.loops.freshContext) {
 				const busy = (await harness().inspect(context)).tasks.some((t) => !t.record.background && t.record.conversationId === (session.conversationId as never));
-				const recent = await conversation.entries({}, RESET_WINDOW, undefined, context);
-				if (!busy && mayResetForLoop(recent.items)) {
+				// Page back past a long previous iteration (each tool call is two entries) to the newest input; a fixed
+				// window would see only the agent's own entries and never reset loops that do real work.
+				const recent = await scanForLastInput<NonNullable<Parameters<typeof conversation.entries>[2]>>((limit, cursor) => conversation.entries({}, limit, cursor, context));
+				if (!busy && mayResetForLoop(recent.items, recent.settled ? Number.POSITIVE_INFINITY : recent.items.length)) {
 					await conversation.reset(loopHandoff(loop, facts?.openAgentPrs.map((pr) => pr.number) ?? []), context);
 					audit("loop_fresh_context", { loop: loop.id, iteration });
 				}
