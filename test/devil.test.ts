@@ -36,6 +36,12 @@ describe("buildEvidence", () => {
 		assert.doesNotMatch(text, /ghp_/);
 	});
 
+	it("leads with the day's spend inside and outside loops when given", () => {
+		const text = buildEvidence({ now: NOW, loops: [loop], audit: [], chat: [], spend: { capUsd: 10, allSessionsUsd: 14, loopsUsd: 9, byLoop: { L1: 6, L2: 3 } } });
+		assert.match(text, /^SPEND LAST 24H: all pi sessions \$14\.00 \(loops \$9\.00, outside loops \$5\.00\) of a \$10 daily cap/);
+		assert.match(text, /By loop: L1 \$6\.00, L2 \$3\.00/);
+	});
+
 	it("stays bounded", () => {
 		const audit = Array.from({ length: 3000 }, (_, i) => ({ at: at(1), event: "parked", repo: "o/r", pr: i, reason: "x".repeat(300) }));
 		const chat = Array.from({ length: 50 }, () => ({ at: at(1), from: "a", to: "all", text: "y".repeat(4000) }));
@@ -61,5 +67,16 @@ describe("devils-advocate preset", () => {
 		const loopState = { kind: "devils-advocate" as const, iteration: 2, lastRunAt: NOW - 7 * 3_600_000 };
 		assert.equal(shouldWake({ loop: loopState, repo, now: NOW }).wake, true);
 		assert.equal(shouldWake({ loop: loopState, repo: { ...repo, dailySpendShare: 0.8 }, now: NOW }).wake, false);
+	});
+});
+
+describe("budget-review preset", () => {
+	it("is its own kind, every 4h, and wakes on schedule even when dormant or near the cap", () => {
+		assert.equal(LOOP_SCHEDULE["budget-review"].kind, "budget-review");
+		assert.equal(LOOP_SCHEDULE["budget-review"].intervalMinutes, 240);
+		assert.match(LOOP_PROMPTS["budget-review"], /factory_evidence/);
+		const repo = { openAgentPrs: [], openFrictionIssues: 0, baseHeadSha: "abc", baseHeadCommittedAt: NOW, dailySpendShare: 0.95 } as never;
+		const loop = { kind: "budget-review" as const, iteration: 3, lastRunAt: NOW - 1000, dormant: { fingerprint: "x", since: 0 } };
+		assert.equal(shouldWake({ loop, repo, now: NOW }).wake, true);
 	});
 });
