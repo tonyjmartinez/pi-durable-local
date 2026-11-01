@@ -20,5 +20,6 @@ Details, ownership and open work: `docs/agent-chat.md`. The same messages show i
 
 ## Rules that are easy to miss
 - pi never runs Opus: Sonnet for reasoning roles, Haiku for tool work only.
+- The daily cap (`loops.dailyBudgetUsd`) limits pi's Claude API spend only. Claude Code and Codex generals are limited only by their own app plans: when pi is capped, do the work yourself or `pd budget boost <usd> --by <your-name> --reason "..."`. Don't reset or edit the cap itself.
 - The factory's push guard refuses `.github/` changes from agents; the owner pushes those.
 - Restart the daemon (`pdd-up stop && pdd-up`) only after the change is merged and tests pass in the main checkout.

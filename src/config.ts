@@ -46,7 +46,8 @@ export type Policy = {
 	loops: {
 		/** Start every loop iteration from a short handoff instead of the whole history (the main cost saver). */
 		freshContext: boolean;
-		/** Cap on all loops' spend together in any 24 hours, in USD; loops wait for room when it is reached. 0 = no cap. */
+		/** Cap on all pi spend (the Claude API) together in any 24 hours, in USD; loops wait and sends are refused when it is
+		 * reached. 0 = no cap. Generals (Claude Code, Codex) run on their own app plans and are never limited by it. */
 		dailyBudgetUsd: number;
 		/** At most this many loop iterations run at once; the rest queue by priority. Unset or 0: no limit. */
 		maxConcurrent?: number;
@@ -58,6 +59,8 @@ export type Policy = {
 		paceWindowHours?: number;
 		/** Model for routine maintenance loops (friction-sweep, ci-health, code-quality, cleanup). Unset = session model. */
 		maintenanceModel?: string;
+		/** Temporary raises of the daily cap by a general (`pd budget boost`); expired ones are ignored. See boost.ts. */
+		boosts?: { usd: number; at: number; until: number; by: string; reason: string }[];
 		/** Optional one-time budget start in epoch milliseconds; historical spend remains recorded. */
 		dailyBudgetSince?: number;
 		/** Hard cap on spend per loop, in USD; the loop pauses when crossed. */

@@ -1,11 +1,12 @@
 // The daemon's request handling, minus the daemon: validation, defaults and edits as pure functions, and the few
 // operations that touch tasks or files through an injected interface. Importing this starts nothing, so every piece
 // can be tested without opening the store or a socket.
-import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { LOOP_PROMPTS, LOOP_SCHEDULE, type LoopPreset } from "./loopgate.ts";
 import { parsePriority, type Priority, requestGoal } from "./queue.ts";
 import type { Loop, Memory } from "./state.ts";
+import { type Boost, withBoost } from "./boost.ts";
 
 export class HttpError extends Error {
 	readonly status: number;
@@ -303,6 +304,12 @@ export function updateProjectPolicy(file: string, change: { repo: string; baseBr
 	const { policy, mergeEnabled } = editProjectPolicy(JSON.parse(readFileSync(file, "utf8")) as PolicyJson, change);
 	writeFileSync(file, `${JSON.stringify(policy, null, "\t")}\n`);
 	return { mergeEnabled };
+}
+
+/** Adds a general's boost to policy.json, dropping expired ones; other keys are kept as written. */
+export function boostPolicyFile(file: string, boost: Boost, now: number): void {
+	const raw = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as PolicyJson) : ({} as PolicyJson);
+	writeFileSync(file, `${JSON.stringify(withBoost(raw as never, boost, now), null, "\t")}\n`);
 }
 
 /** Error text when `cwd` is a git worktree (`.git` is a file whose gitdir lies outside it), else undefined. Fixes #23. */
