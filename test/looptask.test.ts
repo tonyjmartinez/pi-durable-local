@@ -1306,6 +1306,16 @@ describe("the personal assistant", () => {
 	});
 });
 
+describe("loop prompt delegation", () => {
+	it("tells every loop to hand mechanical work to the fast subagent, and keeps judgment and shipping", async () => {
+		const { loadPolicy } = await import("../src/config.ts");
+		const prompt = ext.loopPrompt({ id: "L1", iteration: 0, maxIterations: 5, goal: "g", kind: "goal" } as never, loadPolicy());
+		assert.match(prompt, /Hand mechanical work \(.*screenshots.*\) to the fast subagent/);
+		assert.match(prompt, /keep judgment, planning and shipping yourself/);
+		assert.match(prompt, /use the fast subagent for bounded research and mechanical work/);
+	});
+});
+
 describe("resetDecision", () => {
 	const e = (kind: string, data?: unknown) => ({ kind, data });
 	it("resets after a peer note and carries it into the handoff", () => {
