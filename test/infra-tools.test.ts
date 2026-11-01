@@ -75,16 +75,18 @@ it("rechecks factory spend when budget fills during dispatch preparation",async(
 });
 
 it("reads one repo once for shared sessions, separates pending head evidence and shows the persisted quota",async()=>{
- doc().byId.L2=loop({id:"L2",session:"worker",kind:"goal"});
- doc().byId.L3=loop({id:"L3",session:"other",kind:"goal"});
+ doc().byId.L2=loop({id:"L2",session:"worker",kind:"ci-health",status:"paused",note:"paused by user"});
+ doc().byId.L3=loop({id:"L3",session:"other",kind:"ci-health"});
  doc().infraDispatches=[Date.now(),Date.now()];
  const runs=[{headSha:"new1234",workflowName:"test",status:"in_progress",conclusion:null,createdAt:"2026-11-01T12:00:00Z"},{headSha:"old1234",workflowName:"test",status:"completed",conclusion:"failure",createdAt:"2026-11-01T11:00:00Z"}];
  gh.script([{match:"^api user",responses:["owner"]},{match:"^repo view",responses:["main"]},{match:"^run list",responses:[JSON.stringify(runs)]},{match:"^pr list",responses:[JSON.stringify([{number:5,headRefName:"pd/fix",statusCheckRollup:[{conclusion:"SKIPPED"}]}])]}]);
  const out=resultText(await call("pipeline_evidence",{}));
  assert.match(out,/ci_dispatch left today: 1/);assert.match(out,/1 latest-head workflow\(s\) pending/);
  assert.match(out,/recent completed CI failures/);assert.match(out,/1 without checks/);
+ assert.match(out,/ci-health L3 active/);assert.match(out,/2 live CI loops \(duplicate coverage/);
  assert.doesNotMatch(out,/CI RED on new1234/);
  assert.equal(gh.callsMatching(/^run list/).length,1);assert.equal(gh.callsMatching(/^pr list/).length,1);
+ assert.match(gh.callsMatching(/^pr list/)[0]!,/--limit 100/);
  assert.equal(created,0);
 });
 it("keeps failed branch and PR reads unknown instead of probing an invented default",async()=>{

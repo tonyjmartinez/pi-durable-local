@@ -9,7 +9,7 @@ export const ASSISTANT_FULL_RUN_HOURS = 12;
 import { countUnchecked, lensPrompt, proposalDue, recordLens } from "./strategist.ts";
 import { auditTail } from "./ops.ts";
 import { repoMap } from "./repomap.ts";
-import { buildPipelineDigest, dispatchRefusal, infraEvents, infraWake, MAX_DISPATCHES_PER_DAY, type PipelineRepo, pipelineKey, prChecksOf, recentDispatches, reserveDispatch, dispatchCount } from "./infra.ts";
+import { buildPipelineDigest, dispatchRefusal, infraEvents, infraWake, MAX_DISPATCHES_PER_DAY, type PipelineRepo, pipelineKey, prChecksOf, recentDispatches, reserveDispatch, dispatchCount, PIPELINE_PR_LIMIT, inconclusiveWorkflows } from "./infra.ts";
 import { applyResume, assertNoTwin, newLoop, resolveLoopSpec, assertNoTwinOnResume } from "./ops.ts";
 import { execFile } from "node:child_process";
 import { lookup } from "node:dns/promises";
@@ -2297,16 +2297,18 @@ async function pipelineState(loops: readonly Loop[], sessions: Record<string, Se
 	const me = await viewerLogin(context).catch(() => "");
 	const repos: PipelineRepo[] = [];
 	for (const [repo, names] of byRepo) {
-		const ciLoop = live.find((loop) => loop.kind === "ci-health" && names.includes(loop.session));
+		const ciLoops = live.filter((loop) => loop.kind === "ci-health" && names.includes(loop.session));
+		const ciLoop = ciLoops.find((loop) => loop.status === "active") ?? ciLoops[0];
 		const base = await baseBranchOf(repo, policy, context).catch(() => undefined);
 		const ci = base === undefined ? undefined : await gh(["run", "list", "--repo", repo, "--branch", base, "--limit", String(CI_RUNS_WINDOW), "--json", "headSha,workflowName,conclusion,status,createdAt"], context)
 			.then((out) => ({ runs: JSON.parse(out) as Parameters<typeof summarizeRuns>[0] }))
 			.catch(() => undefined);
-		const prs = me === ""
+		const listedPrs = me === ""
 			? undefined
-			: await gh(["pr", "list", "--repo", repo, "--author", me, "--state", "open", "--json", "number,headRefName,statusCheckRollup"], context)
-				.then((out) => (JSON.parse(out) as { number: number; headRefName: string; statusCheckRollup?: never }[]).filter((pr) => pr.headRefName.startsWith(policy.automerge.branchPrefix)))
+			: await gh(["pr", "list", "--repo", repo, "--author", me, "--state", "open", "--limit", String(PIPELINE_PR_LIMIT), "--json", "number,headRefName,statusCheckRollup"], context)
+				.then((out) => JSON.parse(out) as { number: number; headRefName: string; statusCheckRollup?: never }[])
 				.catch(() => undefined);
+		const prs = listedPrs?.filter((pr) => pr.headRefName.startsWith(policy.automerge.branchPrefix));
 		const summary = ci === undefined ? undefined : summarizeRuns(ci.runs);
 		const pendingRuns = summary === undefined || ci === undefined ? 0 : ci.runs.filter((run) => run.headSha === summary.headSha && run.status !== "completed").length;
 		repos.push({
@@ -2318,6 +2320,9 @@ async function pipelineState(loops: readonly Loop[], sessions: Record<string, Se
 			prChecks: prChecksOf(prs ?? []),
 			prChecksReadable: prs !== undefined,
 			pendingRuns,
+			ciLoopCount: ciLoops.length,
+			...(ci ? { inconclusiveWorkflows: inconclusiveWorkflows(ci.runs), runsAtLimit: ci.runs.length >= CI_RUNS_WINDOW } : {}),
+			prsAtLimit: listedPrs !== undefined && listedPrs.length >= PIPELINE_PR_LIMIT,
 			...(ciLoop !== undefined ? { ciLoop: { id: ciLoop.id, status: ciLoop.status, dormant: ciLoop.dormant !== undefined, ...(ciLoop.note ? { note: ciLoop.note } : {}) } } : {}),
 		});
 	}

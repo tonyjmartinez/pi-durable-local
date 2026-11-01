@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildPipelineDigest, dispatchRefusal, dispatchCount, infraEvents, infraWake, pipelineKey, prChecksOf, recentDispatches, reserveDispatch, rollupState, type PipelineRepo } from "../src/infra.ts";
+import { buildPipelineDigest, dispatchRefusal, dispatchCount, inconclusiveWorkflows, infraEvents, infraWake, pipelineKey, prChecksOf, recentDispatches, reserveDispatch, rollupState, type PipelineRepo } from "../src/infra.ts";
 import { newLoop, resolveLoopSpec } from "../src/ops.ts";
 import { priorityOf } from "../src/queue.ts";
 import { shouldWake } from "../src/loopgate.ts";
@@ -73,4 +73,11 @@ describe("infra cost gate and dispatch authority", () => {
   assert.equal(loop.kind,"infra"); assert.equal(loop.budgetUsd,5); assert.equal(loop.intervalMinutes,60); assert.equal(priorityOf(loop),2);
   assert.equal(shouldWake({loop:{kind:"infra",iteration:2,lastRunAt:now-hour},repo:{baseHeadSha:"a",baseHeadCommittedAt:0,openAgentPrs:[{number:1,headSha:"h",checksState:"pending"}],openFrictionIssues:0},now}).wake,true);
  });
+});
+
+it("retains inconclusive latest workflows even when older runs succeeded",()=>{
+ const run=(name:string,conclusion:string,createdAt:string)=>({workflowName:name,conclusion,status:"completed",createdAt});
+ assert.deepEqual(inconclusiveWorkflows([run("build","success","2026-11-01T09:00:00Z"),run("build","cancelled","2026-11-01T10:00:00Z"),run("test","success","2026-11-01T10:00:00Z"),run("deploy","action_required","2026-11-01T10:00:00Z")]),["build","deploy"]);
+ const out=buildPipelineDigest({now,repos:[repo({inconclusiveWorkflows:["deploy"],runsAtLimit:true,prsAtLimit:true})],audit:[],dispatchesLeft:3});
+ assert.match(out,/no definitive latest result: deploy/);assert.match(out,/bounded run history/);assert.match(out,/PR list reached limit/);
 });

@@ -17,6 +17,8 @@ export const INFRA_FULL_RUN_HOURS = 12;
 /** ci_dispatch starts or resumes at most this many loops per rolling 24 hours. */
 export const MAX_DISPATCHES_PER_DAY = 3;
 export const PIPELINE_MAX_CHARS = 10_000;
+/** Bounded GitHub reads; reaching a limit is evidence of incomplete coverage, not a full scan. */
+export const PIPELINE_PR_LIMIT = 100;
 
 /** Pull request check state, counted per open agent PR. */
 export type PrChecks = { failing: number[]; pending: number; passing: number; unchecked?: number };
@@ -35,7 +37,13 @@ export type PipelineRepo = {
 	prChecksReadable?: boolean;
 	/** Latest base-head workflows still running; completed historical results remain separate. */
 	pendingRuns?: number;
+	/** Most recent run per workflow has no success/failure verdict (cancelled, skipped, action-required...). */
+	inconclusiveWorkflows?: string[];
+	/** Bounded remote reads reached their limit; coverage may omit older runs/PRs. */
+	runsAtLimit?: boolean;
+	prsAtLimit?: boolean;
 	/** The repo's ci-health loop, if one exists (any live status). */
+	ciLoopCount?: number;
 	ciLoop?: { id: string; status: string; dormant: boolean; note?: string };
 };
 
@@ -64,6 +72,15 @@ export function prChecksOf(prs: readonly { number: number; statusCheckRollup?: r
 	}
 	out.failing.sort((a, b) => a - b);
 	return out;
+}
+
+/** Preserve the newest result for each workflow; older successes cannot explain away a cancelled latest run. */
+export function inconclusiveWorkflows(runs: readonly { workflowName: string; status: string; conclusion: string | null; createdAt: string }[]): string[] {
+	const latest = new Map<string, { status: string; conclusion: string | null }>();
+	for (const run of [...runs].sort((a,b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))) {
+		if (!latest.has(run.workflowName)) latest.set(run.workflowName, run);
+	}
+	return [...latest].filter(([,run]) => run.status === "completed" && !["success", "failure", "timed_out"].includes(run.conclusion ?? "")).map(([name]) => name).sort();
 }
 
 const isRed = (repo: PipelineRepo) => repo.ci !== undefined && repo.ci.failing.length > 0;
@@ -99,6 +116,7 @@ export function pipelineKey(repos: readonly PipelineRepo[], events: readonly { a
 			repo.base,
 			repo.ci === undefined ? (repo.noCi ? "noci" : "?") : `red:${repo.ci.failing.join(",")}|flaky:${repo.ci.flaky.join(",")}`,
 			`prfail:${repo.prChecks.failing.join(",")}|unchecked:${repo.prChecks.unchecked ?? 0}|readable:${repo.prChecksReadable !== false}`,
+			`inconclusive:${(repo.inconclusiveWorkflows ?? []).join(",")}|prlimit:${repo.prsAtLimit === true}|runlimit:${repo.runsAtLimit === true}|ciloops:${repo.ciLoopCount ?? 0}`,
 			...(isRed(repo) ? [`redhead:${repo.ci!.headSha}`] : []),
 			repo.ciLoop === undefined ? "noloop" : `${repo.ciLoop.id}:${repo.ciLoop.status}${repo.ciLoop.dormant ? ":dormant" : ""}`,
 		].join(" "));
@@ -188,7 +206,7 @@ function repoLine(repo: PipelineRepo): string {
 	const loop = repo.ciLoop === undefined
 		? "no ci-health loop"
 		: `ci-health ${repo.ciLoop.id} ${repo.ciLoop.status}${repo.ciLoop.dormant ? " dormant" : ""}${repo.ciLoop.note ? ` (${clip(repo.ciLoop.note, 100)})` : ""}`;
-	return `- ${repo.repo} (base ${repo.base}; sessions ${repo.sessions.join(", ") || "none"}): ${ci}${repo.pendingRuns ? `; ${repo.pendingRuns} latest-head workflow(s) pending` : ""} | ${prText} | ${loop}`;
+	return `- ${repo.repo} (base ${repo.base}; sessions ${repo.sessions.join(", ") || "none"}): ${ci}${repo.pendingRuns ? `; ${repo.pendingRuns} latest-head workflow(s) pending` : ""}${repo.inconclusiveWorkflows?.length ? `; no definitive latest result: ${repo.inconclusiveWorkflows.join(", ")}` : ""}${repo.runsAtLimit ? "; bounded run history (may omit older workflows)" : ""} | ${prText}${repo.prsAtLimit ? "; PR list reached limit (may omit more)" : ""} | ${loop}${(repo.ciLoopCount ?? 0) > 1 ? `; ${repo.ciLoopCount} live CI loops (duplicate coverage; ask a general)` : ""}`;
 }
 
 export type PipelineDigestInput = {
