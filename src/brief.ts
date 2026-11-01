@@ -1,4 +1,5 @@
 import { type PivotDirection, pivotLines, pivotStale } from "./direction.ts";
+import { type Boost, describeBoost } from "./boost.ts";
 // `pd brief`: the one read a general needs. Generals are the Opus Claude Code sessions (and Tony) that steer the
 // factory from outside; pi's sessions are the cheap workforce. The brief puts what only a general can do first
 // (approve a parked PR, unblock a loop, answer a needs-decision issue), then a one-line view of the workforce.
@@ -24,7 +25,7 @@ export type BriefInput = {
 	/** The personal assistant's latest agenda for Tony (memory topic owner-agenda). */
 	agenda?: { text: string; by: string; updatedAt: number };
 	/** The factory budget (see budgetStatus) plus the loop queue's counts. */
-	budget?: { capUsd: number; daySpend: number; exceeded: boolean; pace?: { windowHours: number; spent: number; allowance: number }; running: number; waiting: number };
+	budget?: { capUsd: number; daySpend: number; exceeded: boolean; pace?: { windowHours: number; spent: number; allowance: number }; running: number; waiting: number; boosts?: Boost[] };
 };
 
 export type ParkedPr = { key: string; repo: string; pr: number; sha: string; reason: string; review?: string; at: string };
@@ -63,7 +64,8 @@ const clip = (text: string, length: number) => (text.length <= length ? text : `
 export function budgetLine(b: NonNullable<BriefInput["budget"]>): string {
 	const day = b.capUsd > 0 ? `$${b.daySpend.toFixed(2)} of $${b.capUsd} cap in 24h (${Math.round((b.daySpend / b.capUsd) * 100)}%${b.exceeded ? ", waiting for room" : ""})` : `$${b.daySpend.toFixed(2)} in 24h, no cap`;
 	const pace = b.pace ? `; last ${b.pace.windowHours}h $${b.pace.spent.toFixed(2)} of $${b.pace.allowance.toFixed(2)} pace` : "";
-	return `BUDGET: ${day}${pace}; ${b.running} running, ${b.waiting} waiting for a turn`;
+	const boosts = b.boosts?.length ? `; boosted: ${b.boosts.map(describeBoost).join(", ")}` : "";
+	return `BUDGET: ${day}${pace}; ${b.running} running, ${b.waiting} waiting for a turn${boosts}`;
 }
 
 export function buildBrief(input: BriefInput): string {

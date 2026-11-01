@@ -34,6 +34,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { AUDIT_LOG, DATA_DIR, loadPolicy, type Policy, splitModel } from "./config.ts";
 import { AUTO_DORMANT_AFTER, afterIteration, CI_RUNS_WINDOW, MAINTENANCE_BRANCH_SLUGS, ciKey, DORMANT_RECHECK_MINUTES, type GatePr, type GateRepo, shouldWake, summarizeRuns, workFingerprint } from "./loopgate.ts";
+import { dailyCapUsd } from "./boost.ts";
 import { budgetStatus, dailySpend, nextRoomAt, recordSpend, recordTotal, spendByLoop, totalSpendInWindow } from "./spend.ts";
 
 /** How often a loop waiting on the daily cap looks again (no model call). */
@@ -68,6 +69,8 @@ const fail = (value: string) => ({ ...text(value), isError: true });
 const WORKFLOW = `You are one of several long-running pi-durable agent sessions on Tony's machine (a small software factory). You persist across restarts.
 
 Chain of command: you are the workforce. The generals are Tony and the Opus Claude Code sessions he runs; they set goals, approve parked PRs, answer needs-decision issues, and can do what you cannot (open a real browser, look at the live site, add CI, provide secrets). They read \`pd brief\`, so when you need one, make it a single concrete ask: what is blocked, what you tried, the options, and your recommendation. Do the work yourself whenever a reversible choice will do.
+
+Budget: the factory's daily cap limits only what pi spends on the Claude API (you and the other pi sessions). Generals run Claude Code or Codex on their own app plans, so the cap never limits them. When the cap stops urgent work, say so in loop_report (status "blocked", the single ask): a general can raise the cap for a few hours with \`pd budget boost\` or do the work themselves. Never try to get around the cap.
 
 Your environment:
 - Your shell runs in a sandbox: your project directory, /tmp and package caches are writable; the rest of $HOME is read-only; you have no SSH keys and no GitHub token. That is deliberate. Never try to find or use credentials.
@@ -1456,7 +1459,7 @@ export async function currentBudget(reader: { snapshot: Harness["snapshot"] }, c
 		loops: Object.values(doc?.byId ?? {}),
 		...(doc?.factorySpend ? { samples: doc.factorySpend } : {}),
 		now,
-		capUsd: policy.loops.dailyBudgetUsd,
+		capUsd: dailyCapUsd(policy, now),
 		...(policy.loops.dailyBudgetSince !== undefined ? { since: policy.loops.dailyBudgetSince } : {}),
 	});
 }
@@ -1464,7 +1467,7 @@ export async function currentBudget(reader: { snapshot: Harness["snapshot"] }, c
 /** Why a message that would make a pi session spend is refused right now, or undefined when there is room. */
 export function capRefusal(budget: { capUsd: number; daySpend: number; exceeded: boolean }): string | undefined {
 	return budget.exceeded
-		? `the factory's daily cap is reached ($${budget.daySpend.toFixed(2)} of $${budget.capUsd} in 24h), so pi sessions take no new messages until there is room. Queue it with pd ask (it runs when there is room), or resend with --force if it cannot wait.`
+		? `the factory's daily cap is reached ($${budget.daySpend.toFixed(2)} of $${budget.capUsd} in 24h), so pi sessions take no new messages until there is room. Queue it with pd ask (it runs when there is room), or, if it cannot wait, raise the cap with pd budget boost <usd> --by <general> --reason "..." (audited), resend with --force, or do the work yourself: generals are not limited by this cap.`
 		: undefined;
 }
 
@@ -1693,11 +1696,12 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 			// Loops are not the only spenders: direct sends, chat messages and reviews cost too. The daemon samples every
 			// session's total (sampleFactorySpend); charge the day's change, so the cap holds for all pi agents.
 			const samples = (await runtime.snapshot(Loops, context))?.factorySpend;
+			const capUsd = dailyCapUsd(policy);
 			const budget = budgetStatus({
 				loops: allLoops,
 				samples,
 				now: Date.now(),
-				capUsd: policy.loops.dailyBudgetUsd,
+				capUsd,
 				since: budgetSince,
 				...(policy.loops.pace !== undefined ? { pace: policy.loops.pace } : {}),
 				...(policy.loops.paceBurst !== undefined ? { paceBurst: policy.loops.paceBurst } : {}),
@@ -1707,9 +1711,9 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 			if (daily.exceeded) {
 				// Look again within the hour even when the oldest loop charge ages out later: other spend is only sampled,
 				// and the cap or its start can change. A check costs no model call.
-				const roomAt = budget.loopDaySpend >= policy.loops.dailyBudgetUsd ? nextRoomAt(budgetLoops, Date.now(), policy.loops.dailyBudgetUsd) : undefined;
+				const roomAt = budget.loopDaySpend >= capUsd ? nextRoomAt(budgetLoops, Date.now(), capUsd) : undefined;
 				const at = Math.min(roomAt ?? Number.POSITIVE_INFINITY, Date.now() + CAP_RECHECK_MINUTES * 60_000);
-				audit("loop_skip", { loop: loop.id, reason: `daily budget $${policy.loops.dailyBudgetUsd} reached ($${daily.spent.toFixed(2)})`, nextCheckMinutes: Math.ceil((at - Date.now()) / 60_000) });
+				audit("loop_skip", { loop: loop.id, reason: `daily budget $${capUsd} reached ($${daily.spent.toFixed(2)})`, nextCheckMinutes: Math.ceil((at - Date.now()) / 60_000) });
 				await runtime.commit(async (tx) => {
 					const current = (await tx.doc(Loops)).byId[task.input.loopId]!;
 					current.nextRunAt = at;
@@ -1719,7 +1723,7 @@ export const LoopTask = defineTask<{ loopId: string }, LoopCheckpoint, { iterati
 				return;
 			}
 			// The cheap gate: decide from GitHub facts whether a model call is worth it at all.
-			const dailySpendShare = policy.loops.dailyBudgetUsd > 0 ? daily.spent / policy.loops.dailyBudgetUsd : undefined;
+			const dailySpendShare = capUsd > 0 ? daily.spent / capUsd : undefined;
 			const facts = await gateFacts(loop, session, policy, context, { allLoops, sessions: sessions?.byName ?? {}, ...(dailySpendShare !== undefined ? { dailySpendShare } : {}) }).catch(() => undefined);
 			// A dormant loop with no readable repo stays asleep: only a resume wakes it.
 			const gate = facts !== undefined
@@ -1971,7 +1975,7 @@ export const Loops_ = defineExtension({
 				const latest = samples?.[samples.length - 1];
 				const loopsUsd = dailySpend(loops, now);
 				const spend = {
-					capUsd: loadPolicy().loops.dailyBudgetUsd,
+					capUsd: dailyCapUsd(loadPolicy(), now),
 					loopsUsd,
 					allSessionsUsd: Math.max(loopsUsd, latest === undefined ? 0 : totalSpendInWindow(samples, latest.total, now)),
 					byLoop: spendByLoop(loops, now),

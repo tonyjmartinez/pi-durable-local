@@ -47,6 +47,7 @@ import {
 	resolveLoopSpec,
 	sendMode,
 	stopPatch,
+	boostPolicyFile,
 	updateProjectPolicy,
 	validateSessionName,
 	worktreeCwdProblem,
@@ -54,6 +55,7 @@ import {
 import { applyDirection, directionKey } from "./direction.ts";
 import { postChat } from "./chat.ts";
 import { githubRepoOf } from "./extensions.ts";
+import { activeBoosts, dailyCapUsd, parseBoost } from "./boost.ts";
 import { Approvals, audit, Directions, type Loop, Loops, Memories, Sessions } from "./state.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -212,12 +214,14 @@ async function status() {
 			loops,
 			...(loopsDoc?.factorySpend ? { samples: loopsDoc.factorySpend } : {}),
 			now,
-			capUsd: policy.loops.dailyBudgetUsd,
+			capUsd: dailyCapUsd(policy, now),
 			...(policy.loops.dailyBudgetSince !== undefined ? { since: policy.loops.dailyBudgetSince } : {}),
 			...(policy.loops.pace !== undefined ? { pace: policy.loops.pace } : {}),
 			...(policy.loops.paceBurst !== undefined ? { paceBurst: policy.loops.paceBurst } : {}),
 			...(policy.loops.paceWindowHours !== undefined ? { paceWindowHours: policy.loops.paceWindowHours } : {}),
 		}),
+		baseCapUsd: policy.loops.dailyBudgetUsd,
+		boosts: activeBoosts(policy.loops.boosts, now),
 		running: queue.filter((entry) => entry.state === "running").length,
 		waiting: queue.filter((entry) => entry.state === "waiting").length,
 	};
@@ -386,6 +390,25 @@ const routes: [string, RegExp, Route][] = [
 			delete memories.items[m[1]!];
 			return { removed: existed };
 		}, context)],
+	["GET", /^\/budget$/, async () => {
+		const policy = loadPolicy();
+		const now = Date.now();
+		return { ...(await currentBudget(harness, context, now)), baseCapUsd: policy.loops.dailyBudgetUsd, boosts: activeBoosts(policy.loops.boosts, now) };
+	}],
+	// A general lends pi extra headroom for a few hours. Generals run on their own app plans; the cap is pi's alone.
+	["POST", /^\/budget\/boost$/, async (_m, body) => {
+		const now = Date.now();
+		let boost;
+		try {
+			boost = parseBoost(body, now);
+		} catch (error) {
+			throw new HttpError(400, error instanceof Error ? error.message : String(error));
+		}
+		boostPolicyFile(POLICY_FILE, boost, now);
+		audit("budget_boost", { usd: boost.usd, until: boost.until, by: boost.by, reason: boost.reason });
+		const policy = loadPolicy();
+		return { boost, capUsd: dailyCapUsd(policy, now), baseCapUsd: policy.loops.dailyBudgetUsd, boosts: activeBoosts(policy.loops.boosts, now) };
+	}],
 	["GET", /^\/directions$/, async () => (await harness.snapshot(Directions, context))?.byKey ?? {}],
 	["GET", /^\/directions\/(.+)$/, async (m) => {
 		const key = await resolveDirectionKey(decodeURIComponent(m[1]!));
