@@ -27,6 +27,10 @@ const CASES: Case[] = [
 	{ name: "closed beats a draft", state: pr({ state: "CLOSED", isDraft: true }), action: "stop" },
 
 	// Mechanical blockers, in upstream order (draft, conflicts, behind, CI)
+	{ name: "spike is never merged, even fully green", state: pr({ isSpike: true }), action: "park-human" },
+	{ name: "spike is never merged, even human-approved", state: pr({ isSpike: true, humanApproved: true }), action: "park-human" },
+	{ name: "spike draft is parked, not marked ready", state: pr({ isSpike: true, isDraft: true }), action: "park-human" },
+	{ name: "a closed spike just stops", state: pr({ isSpike: true, state: "CLOSED" }), action: "stop" },
 	{ name: "draft", state: pr({ isDraft: true }), action: "mark-ready" },
 	{ name: "draft before conflicts", state: pr({ isDraft: true, conflicts: true }), action: "mark-ready" },
 	{ name: "conflicts", state: pr({ conflicts: true }), action: "resolve-conflicts" },
@@ -145,5 +149,18 @@ describe("decidePr", () => {
 			[{ state: "MERGED", tier: "medium", aiReview: true }, "done"],
 		];
 		for (const [change, action] of steps) assert.equal(decidePr(pr(change)).action, action, JSON.stringify(change));
+	});
+});
+
+describe("a draft or spike PR is never merged", () => {
+	it("no combination of draft/spike with otherwise-green gates yields merge", () => {
+		for (const isDraft of [true, false]) {
+			for (const isSpike of [true, false]) {
+				for (const humanApproved of [true, false]) {
+					const action = decidePr(pr({ isDraft, isSpike, humanApproved })).action;
+					if (isDraft || isSpike) assert.notEqual(action, "merge", `draft=${isDraft} spike=${isSpike} approved=${humanApproved}`);
+				}
+			}
+		}
 	});
 });

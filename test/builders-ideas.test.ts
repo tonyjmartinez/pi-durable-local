@@ -10,6 +10,7 @@ describe("builders do not go dormant while ideas exist", () => {
 	});
 	it("the design prompt files ideas instead of idling when the checklist is clean", () => {
 		assert.match(DESIGN_POLISH_PROMPT, /do not idle/);
+		assert.match(DESIGN_POLISH_PROMPT, /last 24h and its status is still new/);
 		assert.match(DESIGN_POLISH_PROMPT, /docs\/IDEAS\.md/);
 	});
 });

@@ -854,6 +854,7 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 	const state: PrTickState = {
 		state: pr.state as PrTickState["state"],
 		isDraft: pr.isDraft,
+		isSpike: pr.headRefName.startsWith(`${rules.branchPrefix}spike-`),
 		conflicts: pr.mergeable === "CONFLICTING",
 		behind: pr.mergeStateStatus === "BEHIND" || ((await commitsBehind(repo, base, pr.headRefOid, context)) ?? 0) > 0,
 		checks,
@@ -861,7 +862,7 @@ export async function gatherShipFacts(repo: string, number: number, policy: Poli
 		unresolvedThreads,
 		tier: tier.tier,
 		door: parsed.door ?? "one-way",
-		mergeAllowed: rules.repos.includes(repo) && pr.headRefName.startsWith(rules.branchPrefix),
+		mergeAllowed: rules.repos.includes(repo) && pr.headRefName.startsWith(rules.branchPrefix) && !pr.headRefName.startsWith(`${rules.branchPrefix}spike-`),
 		...(review === undefined ? {} : { aiReview: review.approve, aiReviewReasons: review.reasons }),
 		// An approval covers only the exact commit Tony approved; any later push needs a new one.
 		humanApproved: approval?.sha === pr.headRefOid,

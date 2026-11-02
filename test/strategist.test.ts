@@ -78,3 +78,12 @@ describe("lens rotation", () => {
 		assert.deepEqual(recordLens([0], 99), [0, 1]);
 	});
 });
+
+describe("spikes", () => {
+	it("the strategist prompt allows one draft spike per repo on pd/spike-<slug>", () => {
+		assert.match(PRODUCT_STRATEGIST_PROMPT, /pd\/spike-<slug>/);
+		assert.match(PRODUCT_STRATEGIST_PROMPT, /DRAFT PR/);
+		assert.match(PRODUCT_STRATEGIST_PROMPT, /At most ONE open spike per repo/);
+		assert.match(PRODUCT_STRATEGIST_PROMPT, /close the spike PR/);
+	});
+});

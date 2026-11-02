@@ -24,6 +24,8 @@ export type CheckBucket = "pass" | "fail" | "pending" | "skipping" | "cancel";
 export type PrTickState = {
 	state: "OPEN" | "MERGED" | "CLOSED";
 	isDraft: boolean;
+	/** A throwaway prototype branch (`<prefix>spike-*`): opened as a draft to react to, closed when decided, never merged. */
+	isSpike?: boolean;
 	/** GitHub `mergeable === "CONFLICTING"`. */
 	conflicts: boolean;
 	/** GitHub `mergeStateStatus === "BEHIND"`. */
@@ -108,6 +110,7 @@ export function decidePr(state: PrTickState, overrides: Partial<PrTickOptions> =
 	}
 	if (state.state === "CLOSED") return { action: "stop", reason: "Pull request is closed without merging." };
 
+	if (state.isSpike === true) return { action: "park-human", reason: "A spike is a prototype to react to: it is never merged. Leave it for the proposal's decision, then close it." };
 	if (state.isDraft) return { action: "mark-ready", reason: "Mark the draft pull request ready for review." };
 	// GitHub reports a conflict when the base squash-merged an earlier commit of this same change; a rebase drops it.
 	if (state.conflicts) {
