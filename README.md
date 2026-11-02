@@ -241,6 +241,7 @@ Before waking a model, the loop checks GitHub through the daemon's own `gh` (a h
 | `business-review` | business-review | daily | the factory's business owner: opens no PRs, edits no files. Reads 7 days of spend and merges from `factory_evidence`, scores each project on cost, market, path to money and time to first dollar, and ranks them (invest, maintain, pivot, pause). Acts on at most two items per run: a `Business: ` priority change or new-project pitch (needs-decision, one open pitch at a time) or a short note to a session. Never outward-facing; never dormant, but held back near the cap like maintenance; $3 budget |
 
 | `personal-assistant` | assistant | every 30 minutes | opens no PRs: Tony's assistant. Reads OWNER ITEMS (parked PRs, needs-decision issues, loops blocked on him) from `factory_evidence`, keeps a ranked agenda of at most 5 items in memory (`owner-agenda`, shown at the top of `pd brief`), and nudges at most two worker sessions per run with answers from his standing decisions. Runs on the maintenance model and skips with no model call unless something that could need Tony changed (a full run at least every 12h); $3 budget |
+| `infra-lead` | infra | hourly check | checks base CI and agent PR checks across repositories, keeps a `pipeline-scorecard` in memory shown by `pd brief`, and dispatches ci-health workers (at most 3 per rolling day); high queue priority, $5 total allowance, model calls only on changed pipeline evidence or every 12 hours, subject to existing budget/pacing |
 
 Run the devil's advocate on a session whose repo is the factory itself (a clone of pi-durable-local) so its findings land where they can be fixed: `pd loop start <session> --preset devils-advocate`. Its findings are titled `Devil's advocate: ...`; the tone is blunt by design, but it may not insult people and must quote evidence.
 
@@ -404,3 +405,7 @@ The pure modules (guard, template, tick, gate, friction, notify, redact) are cov
 ## Credits
 
 The autopilot ideas behind this factory, including the PR template, risk tiers, the one-action-per-tick ship loop, the friction log, and the cleanup automations that skip idle repos, come from Kent C. Dodds's [kcd-skills](https://github.com/kentcdodds/kcd-skills) and his "How I Put My Codebase on Autopilot" video. `decidePr` in `src/prtick.ts` is a port of `decide()` from kcd-skills' `ship-pr.mjs`, used under the MIT License (see the header of that file). Built on `pi-durable`.
+
+### Infrastructure lead
+
+`pd loop start <session> --preset infra-lead` opts a session into factory-wide CI triage. It reads `pipeline_evidence`, records gaps and owners in its scorecard, and uses `ci_dispatch` only for bounded ci-health work. It cannot merge, change CI files, provision secrets, override a user pause or undo a budget-review cut. Workflow proposals go in `docs/proposed-ci/` for owner review. A scorecard is timestamped recorded evidence, not proof of a successful deployment: unreadable checks and unverified deploy paths must remain explicit. Starting this preset is a separate operator action; installing the code starts no loops.
