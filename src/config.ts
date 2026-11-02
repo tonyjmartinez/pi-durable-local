@@ -61,6 +61,8 @@ export type Policy = {
 		maintenanceModel?: string;
 		/** Temporary raises of the daily cap by a general (`pd budget boost`); expired ones are ignored. See boost.ts. */
 		boosts?: { usd: number; at: number; until: number; by: string; reason: string }[];
+		/** Tony's ranked interests: "owner/repo" or { repo, focus }. The budget reviewer cuts loops that produce nothing on them. See cut.ts. */
+		ownerInterests?: unknown;
 		/** Optional one-time budget start in epoch milliseconds; historical spend remains recorded. */
 		dailyBudgetSince?: number;
 		/** Hard cap on spend per loop, in USD; the loop pauses when crossed. */
