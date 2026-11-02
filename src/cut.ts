@@ -42,8 +42,9 @@ export const STALLED_SPEND_USD = 0.5;
 /** Cuts allowed per rolling window, so one bad run cannot gut the factory. */
 export const MAX_CUTS = 3;
 export const MAX_CUTS_WINDOW_HOURS = 4;
-/** Kinds that keep the factory honest and cheap; never cut. */
-const UNCUTTABLE = new Set(["budget-review", "assistant"]);
+/** Kinds that keep the factory honest and cheap, or that never merge by design (their output is issues, reviews or
+ * CI fixes, so "nothing merged" says nothing about them); never cut. Recommend them with friction_file instead. */
+const UNCUTTABLE = new Set(["budget-review", "assistant", "devils-advocate", "business-review", "strategy", "ci-health"]);
 
 /** Accepts ["owner/repo", ...] or [{ repo, focus }, ...]; anything else is dropped. */
 export function parseInterests(raw: unknown): Interest[] {
@@ -135,7 +136,7 @@ export function cutRefusal(input: {
 	const { target } = input;
 	if (target === undefined) return "no such loop, or it is not active";
 	if (target.status !== "active") return `${target.id} is ${target.status}; only active loops can be cut`;
-	if (UNCUTTABLE.has(target.kind)) return `${target.kind} loops are never cut`;
+	if (UNCUTTABLE.has(target.kind)) return `${target.kind} loops are never cut (they do not merge by design); recommend it with friction_file instead`;
 	if (target.session === input.callerSession) return "you cannot cut your own loop";
 	if (input.targetPriority === 1) return `${target.id} is urgent (priority 1), set by Tony or a general; recommend it with friction_file instead`;
 	if (target.ageHours < CUT_MIN_AGE_HOURS) return `${target.id} is only ${Math.floor(target.ageHours)}h old; give it ${CUT_MIN_AGE_HOURS}h`;

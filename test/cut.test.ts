@@ -70,7 +70,7 @@ describe("cutRefusal", () => {
 		assert.match(refuse(row({ ageHours: 3 }))!, /old/);
 		assert.match(refuse(row({ status: "paused" }))!, /only active/);
 		assert.match(refuse(row({ session: "budget-review" }))!, /own loop/);
-		assert.match(refuse(row({ kind: "assistant" }))!, /never cut/);
+		for (const kind of ["assistant", "budget-review", "devils-advocate", "business-review", "strategy", "ci-health"]) assert.match(refuse(row({ kind, spentUsd: 3 }))!, /never cut/);
 		assert.match(refuse(row({}), { recentCuts: 3 })!, /already 3 cuts/);
 		assert.match(refuse(undefined)!, /no such loop/);
 	});
