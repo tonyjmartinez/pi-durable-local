@@ -1,5 +1,6 @@
 // pd: terminal client for the pdd daemon.
 import { execFileSync, spawnSync } from "node:child_process";
+import { DELIVERY_TOPIC } from "./manager.ts";
 import { PIPELINE_TOPIC } from "./infra.ts";
 import { AGENDA_TOPIC } from "./devil.ts";
 import { priorityOf, queueOrder } from "./queue.ts";
@@ -268,6 +269,7 @@ async function status(): Promise<void> {
 async function brief(): Promise<void> {
 	const [s, audit, memories] = await Promise.all([call("GET", "/status"), call("GET", "/audit"), call("GET", "/memory").catch(() => [])]);
 	const agenda = (memories as Json[]).filter((m) => m.topic === AGENDA_TOPIC).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+	const delivery = (memories as Json[]).filter(m => m.topic === DELIVERY_TOPIC).sort((a,b) => b.updatedAt-a.updatedAt)[0];
 	const pipeline = (memories as Json[]).filter((m) => m.topic === PIPELINE_TOPIC).sort((a, b) => b.updatedAt - a.updatedAt)[0];
 	const gh = (args: string[]) => spawnSync("gh", args, { encoding: "utf8", timeout: 30_000 });
 	const openPrs = new Set<string>();
@@ -287,7 +289,7 @@ async function brief(): Promise<void> {
 			? (JSON.parse(out.stdout || "[]") as Json[]).map((i) => ({ repo: i.repository.nameWithOwner, number: i.number, title: i.title, createdAt: i.createdAt, defaultBy: /^Default by:\s*(\S+)/m.exec(i.body ?? "")?.[1] }))
 			: [];
 	});
-	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, proposals, directions: directions as never, ...(s.budget ? { budget: s.budget } : {}), ...(pipeline ? { pipeline: { text: pipeline.text, by: pipeline.by, updatedAt: pipeline.updatedAt } } : {}), ...(agenda ? { agenda: { text: agenda.text, by: agenda.by, updatedAt: agenda.updatedAt } } : {}) }));
+	console.log(buildBrief({ now: Date.now(), sessions: s.sessions, loops: s.loops, audit, openPrs, decisions, proposals, directions: directions as never, ...(s.budget ? { budget: s.budget } : {}), ...(delivery ? { delivery: { text: delivery.text, by: delivery.by, updatedAt: delivery.updatedAt } } : {}), ...(pipeline ? { pipeline: { text: pipeline.text, by: pipeline.by, updatedAt: pipeline.updatedAt } } : {}), ...(agenda ? { agenda: { text: agenda.text, by: agenda.by, updatedAt: agenda.updatedAt } } : {}) }));
 }
 
 function printLoop(loop: Json): void {
@@ -358,7 +360,7 @@ const HELP = `pd — pi-durable sessions that keep running
 
   pd loop start <session> "goal" [--every 30] [--max 17520] [--budget 100]
   pd loop start <session> --preset product-gardener|design-polish|keep-tests-tight|docs-freshness|legacy-reaper|friction-sweep
-                                   |code-quality|ci-health|devils-advocate|budget-review|business-review|product-strategist|personal-assistant|infra-lead
+                                   |code-quality|ci-health|devils-advocate|budget-review|business-review|product-strategist|personal-assistant|infra-lead|engineering-manager
                                             product maintainer, cleanup, or maintenance preset
                                             (code-quality waits for the product loop; ci-health wakes on a red base;
                                             devils-advocate audits the factory's process and files findings;

@@ -3,6 +3,7 @@
 // (https://github.com/kentcdodds/kcd-skills, MIT). All times are epoch milliseconds.
 
 import { BUDGET_REVIEW_PROMPT, BUSINESS_REVIEW_PROMPT, DEVILS_ADVOCATE_PROMPT, PERSONAL_ASSISTANT_PROMPT } from "./devil.ts";
+import { MANAGER_PROMPT } from "./manager.ts";
 import { INFRA_LEAD_PROMPT } from "./infra.ts";
 import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } from "./strategist.ts";
 
@@ -11,7 +12,7 @@ import { PRODUCT_STRATEGIST_PROMPT, strategistWake, type StrategistSignals } fro
  * code-quality: a cleanup that also waits for the repo's product loop to go quiet. ci-health: wakes only on a red or
  * flaky base branch. design: wakes like goal, but is its own kind so a repo can run one product and one design loop.
  */
-export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "business-review" | "strategy" | "request" | "assistant" | "infra";
+export type LoopKind = "goal" | "design" | "cleanup" | "friction-sweep" | "code-quality" | "ci-health" | "devils-advocate" | "budget-review" | "business-review" | "strategy" | "request" | "assistant" | "infra" | "manager";
 
 export type GateLoop = {
 	/** Default "goal". */
@@ -134,6 +135,7 @@ export function shouldWake(input: { loop: GateLoop; repo: GateRepo; now: number 
 	const kind = loop.kind ?? "goal";
 	const prs = repo.openAgentPrs;
 	// Factory-wide triage must not wait on this session repository’s PRs.
+	if (kind === "manager") return { wake: true, reason: "scheduled delivery check" };
 	if (kind === "infra") return { wake: true, reason: "scheduled pipeline check" };
 
 
@@ -316,7 +318,7 @@ export const DESIGN_POLISH_PROMPT = [
 	"Leave product copy, features and information architecture to the product loop. Do not add fonts, image assets from outside the repo, or dependencies. Name the branch pd/design-<slug> and declare Touches: <area> so it composes with the product loop's PRs; if a product PR is open on the same files, pick another area.",
 ].join("\n");
 
-export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review" | "business-review" | "product-strategist" | "personal-assistant" | "infra-lead";
+export type LoopPreset = CleanupName | "product-gardener" | "design-polish" | "devils-advocate" | "budget-review" | "business-review" | "product-strategist" | "personal-assistant" | "infra-lead" | "engineering-manager";
 
 export const PRODUCT_GARDENER_PROMPT = [
 	"Incrementally improve this repository for its users. Act as the product-minded maintainer, not just a ticket taker.",
@@ -337,6 +339,7 @@ export const LOOP_PROMPTS: Record<LoopPreset, string> = {
 	"business-review": BUSINESS_REVIEW_PROMPT,
 	"personal-assistant": PERSONAL_ASSISTANT_PROMPT,
 	"infra-lead": INFRA_LEAD_PROMPT,
+	"engineering-manager": MANAGER_PROMPT,
 	"product-strategist": PRODUCT_STRATEGIST_PROMPT,
 };
 
@@ -352,5 +355,6 @@ export const LOOP_SCHEDULE: Record<LoopPreset, LoopScheduleEntry> = {
 	"personal-assistant": { kind: "assistant", intervalMinutes: 30, budgetUsd: 3 },
 	// The infra lead looks hourly across every repo, but only calls a model when the pipeline's state changed.
 	"infra-lead": { kind: "infra", intervalMinutes: 60, budgetUsd: 5 },
+	"engineering-manager": { kind: "manager", intervalMinutes: 60, budgetUsd: 2 },
 	"product-strategist": { kind: "strategy", intervalMinutes: 60, budgetUsd: 10 },
 };

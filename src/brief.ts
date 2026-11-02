@@ -26,6 +26,7 @@ export type BriefInput = {
 	agenda?: { text: string; by: string; updatedAt: number };
 	/** Latest infra-lead scorecard; recorded evidence, not a fresh live probe. */
 	pipeline?: { text: string; by: string; updatedAt: number };
+	delivery?: { text: string; by: string; updatedAt: number };
 	/** The factory budget (see budgetStatus) plus the loop queue's counts. */
 	budget?: { capUsd: number; daySpend: number; exceeded: boolean; weekAvgPerDay?: number; pace?: { windowHours: number; spent: number; allowance: number }; running: number; waiting: number; boosts?: Boost[] };
 };
@@ -80,6 +81,10 @@ export function buildBrief(input: BriefInput): string {
 		const minutes = Math.max(0, Math.round((input.now - input.agenda.updatedAt) / 60_000));
 		const age = minutes < 90 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
 		lines.push(`YOUR AGENDA (from ${input.agenda.by}, ${age} ago)`, ...input.agenda.text.trim().split("\n").map((line) => `  ${line}`), "");
+	}
+	if (input.delivery) {
+		const age = Math.max(0, Math.round((input.now - input.delivery.updatedAt) / 60000));
+		lines.push(`DELIVERY SCORECARD (from ${input.delivery.by}, ${age}m ago; recorded evidence)`, ...input.delivery.text.trim().split("\n").slice(0,8).map(line => `  ${clip(line,400)}`), "");
 	}
 	const parks = openParks(input.audit, input.openPrs);
 	if (input.pipeline !== undefined) {
