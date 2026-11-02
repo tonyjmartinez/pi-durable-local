@@ -112,3 +112,13 @@ it("does not renew an exhausted worker allowance or iteration limit",async()=>{
  doc().byId.L2!.spent=0;doc().byId.L2!.note="system failure";doc().byId.L2!.iteration=5;
  assert.match(resultText(await call("ci_dispatch",args)),/iteration limit/);assert.equal(created,0);
 });
+
+it("engineering manager can read evidence but receives no CI dispatch authority",async()=>{
+ doc().byId.L1!.kind="manager";
+ const evidence=await call("factory_evidence",{});
+ assert.notEqual(evidence.isError,true); assert.match(resultText(evidence),/DELIVERY WATCH/);
+ assert.equal((await call("ci_dispatch",{action:"start",session:"worker",reason:"repair CI"})).isError,true);
+ doc().byId.L1!.status="paused";
+ assert.equal((await call("factory_evidence",{})).isError,true);
+ assert.equal(created,0);
+});

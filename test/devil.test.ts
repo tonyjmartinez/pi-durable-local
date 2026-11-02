@@ -96,7 +96,7 @@ describe("business-review preset", () => {
 	});
 	it("gates factory_evidence to business-review sessions", () => {
 		const src = readFileSync(new URL("../src/extensions.ts", import.meta.url), "utf8");
-		assert.match(src, /loop\.kind === "business-review" \|\| loop\.kind === "assistant"\) && loop\.status === "active"/);
+		assert.match(src, /loop\.kind === "business-review" \|\| loop\.kind === "assistant" \|\| loop\.kind === "manager"\) && loop\.status === "active"/);
 	});
 });
 

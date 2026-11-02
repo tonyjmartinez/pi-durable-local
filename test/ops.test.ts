@@ -226,7 +226,7 @@ describe("resolveLoopSpec", () => {
 
 	it("refuses an unknown preset and lists the real ones", () => {
 		for (const preset of ["nope", "", "KEEP-TESTS-TIGHT"]) assert.equal(status(() => resolveLoopSpec({ preset })), 400, preset);
-		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, code-quality, ci-health, product-gardener, design-polish, devils-advocate, budget-review, business-review, personal-assistant, infra-lead, product-strategist/);
+		assert.throws(() => resolveLoopSpec({ preset: "nope" }), /keep-tests-tight, docs-freshness, legacy-reaper, friction-sweep, code-quality, ci-health, product-gardener, design-polish, devils-advocate, budget-review, business-review, personal-assistant, infra-lead, engineering-manager, product-strategist/);
 	});
 
 	it("refuses names that only exist on every object", () => {
