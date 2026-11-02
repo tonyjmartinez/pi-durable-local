@@ -26,7 +26,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { createCodingTools } from "@earendil-works/pi-durable/tools";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { AUDIT_LOG, DB_PATH, ensureDirs, loadPolicy, loadSecrets, POLICY_FILE, SOCKET_PATH, scrubbedEnv, splitModel } from "./config.ts";
-import { dryRunGates, sampleFactorySpend, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_, capRefusal, currentBudget } from "./extensions.ts";
+import { dryRunGates, sampleFactorySpend, sweepAuditFriction, Git_, Guard_, readOriginUrl, LoopTask, Loops_, Memory_, SessionContext, sessionCost, Sessions_, setHarness, Subagent_, Web_, capRefusal, currentBudget, pipelineEvidence } from "./extensions.ts";
 import {
 	applyLoopSettings,
 	applyResume,
@@ -332,6 +332,7 @@ async function streamEvents(name: string, request: IncomingMessage, response: Se
 type Route = (match: RegExpExecArray, body: Record<string, unknown>, request: IncomingMessage, response: ServerResponse) => Promise<unknown>;
 const routes: [string, RegExp, Route][] = [
 	["GET", /^\/status$/, () => status()],
+	["GET", /^\/pipeline$/, () => pipelineEvidence(harness, context)],
 	["POST", /^\/sessions$/, (_m, body) => createSession(body)],
 	["POST", /^\/projects$/, (_m, body) => startProject(body)],
 	["DELETE", /^\/sessions\/([^/]+)$/, async (m) => {

@@ -2051,20 +2051,7 @@ export const Loops_ = defineExtension({
 				const loopDoc = await api.snapshot(Loops, context);
 				const loops = Object.values(loopDoc?.byId ?? {});
 				if (!isInfraLead(loops, caller)) return fail("pipeline_evidence is only for a session running an infra-lead loop.");
-				const now = Date.now();
-				const sessions = (await api.snapshot(Sessions, context))?.byName ?? {};
-				const state = await pipelineState(loops, sessions, loadPolicy(), context);
-				const budget = await pacedBudget(api, context, now);
-				return text(buildPipelineDigest({
-					now,
-					repos: state.repos,
-					audit: state.audit,
-					spend: budget.pace
-						? { spentUsd: budget.pace.spent, allowanceUsd: budget.pace.allowance, windowHours: budget.pace.windowHours, ...(budget.weekAvgPerDay !== undefined ? { weekAvgPerDay: budget.weekAvgPerDay } : {}) }
-						: { spentUsd: budget.daySpend, allowanceUsd: budget.capUsd, ...(budget.weekAvgPerDay !== undefined ? { weekAvgPerDay: budget.weekAvgPerDay } : {}) },
-					dispatchesLeft: Math.max(0, MAX_DISPATCHES_PER_DAY - dispatchCount(loopDoc, now)),
-					...(args.windowHours === undefined ? {} : { windowHours: args.windowHours }),
-				}));
+				return text((await pipelineEvidence(api, context, args.windowHours)).text);
 			},
 		}),
 		defineTool({
@@ -2257,6 +2244,29 @@ export const Loops_ = defineExtension({
 		}),
 	],
 });
+
+/** Owner CLI and the authorized model tool share read-only evidence gathering. No model or dispatch is invoked. */
+export async function pipelineEvidence(reader: { snapshot: Harness["snapshot"] }, context: Context, windowHours?: number): Promise<{ observedAt: number; text: string }> {
+	const loopDoc = await reader.snapshot(Loops, context);
+	const loops = Object.values(loopDoc?.byId ?? {});
+	const sessions = (await reader.snapshot(Sessions, context))?.byName ?? {};
+	const state = await pipelineState(loops, sessions, loadPolicy(), context);
+	const now = Date.now();
+	const budget = await pacedBudget(reader, context, now);
+	return {
+		observedAt: now,
+		text: buildPipelineDigest({
+			now,
+			repos: state.repos,
+			audit: state.audit,
+			spend: budget.pace
+				? { spentUsd: budget.pace.spent, allowanceUsd: budget.pace.allowance, windowHours: budget.pace.windowHours, ...(budget.weekAvgPerDay !== undefined ? { weekAvgPerDay: budget.weekAvgPerDay } : {}) }
+				: { spentUsd: budget.daySpend, allowanceUsd: budget.capUsd, ...(budget.weekAvgPerDay !== undefined ? { weekAvgPerDay: budget.weekAvgPerDay } : {}) },
+			dispatchesLeft: Math.max(0, MAX_DISPATCHES_PER_DAY - dispatchCount(loopDoc, now)),
+			...(windowHours === undefined ? {} : { windowHours }),
+		}),
+	};
+}
 
 /** Whether this session runs a live infra-lead loop: the gate on the infra tools. */
 function isInfraLead(loops: readonly Loop[], session: string | undefined): boolean {
