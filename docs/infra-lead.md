@@ -2,6 +2,8 @@
 
 The infra-lead preset inspects repositories with active or paused loops. It gathers recent base-branch workflow results, agent PR check rollups, CI worker coverage and pipeline audit events without calling a model. Unchanged evidence skips the model for up to 12 hours. Near the existing pacing allowance it yields unless a base is red; global queue and budget gates still apply.
 
+**Direct operation:** `pd pipeline` fetches fresh pipeline evidence through the owner daemon socket without a model call, loop dispatch or policy change. It prints an observation timestamp and the same redacted evidence used by the authorized infra tool. `pd brief` remains a quick view of the latest recorded scorecard. The command is available after the daemon is updated to this version; it does not start another daemon when one is already running.
+
 The pipeline-scorecard memory appears near the top of pd brief with author and age. It is recorded evidence, not a deployment guarantee. Missing runs, unreadable CI and unreadable PR checks remain explicit; the lead must inspect actual workflows and deployment evidence before claiming a deploy path is covered. A green completed workflow alone does not prove a current in-progress deployment succeeded.
 
 ## Operator setup after review and deployment

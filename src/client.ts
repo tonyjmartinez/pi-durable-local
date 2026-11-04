@@ -347,6 +347,7 @@ const HELP = `pd — pi-durable sessions that keep running
   pd budget boost <usd> --by <general> --reason "…" [--hours 24]
                                             generals: raise the cap for a few hours (max $50, 48h; audited)
   pd direct <session|owner/repo> ["text"] [--by n]  show or set a repo direction every loop must ack
+  pd pipeline                               fresh read-only pipeline evidence; no model call or dispatch
   pd brief                                  for generals: what needs a decision, then the workforce
   pd new <name> --cwd <dir> [--purpose "…"] [--model provider/id]
   pd attach <name>                          live view + chat (Ctrl-C detaches; agent keeps going)
@@ -399,6 +400,11 @@ async function main(argv: string[]): Promise<void> {
 			return status();
 		case "brief":
 			return brief();
+		case "pipeline": {
+			const result = await call("GET", "/pipeline");
+			console.log(`PIPELINE OBSERVATION (${new Date(result.observedAt).toISOString()}; read-only, no model call)\n\n${result.text}`);
+			return;
+		}
 		case "new": {
 			const created = await call("POST", "/sessions", {
 				name: positional[0],
